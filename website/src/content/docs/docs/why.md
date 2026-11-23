@@ -14,7 +14,7 @@ These were measured while hunting lag in a real game on node-datachannel (libdat
 | Hidden 1 MiB usrsctp send buffer, so `bufferedAmount` lies | Pure Rust SCTP. The whole queue (pending + in flight) is ours and exposed |
 | cwnd and stack queue need a C++ patch to read | cwnd, ssthresh, srtt exposed per peer |
 | Some options silently ignored | Unknown options throw |
-| No RACK/TLP, so loss waits for the RTO and p95 spikes | RACK-TLP (RFC 8985), ported from Pion's approach |
+| No RACK/TLP, so loss waits for the RTO and p95 spikes | RACK-TLP (RFC 8985) in the vendored rtc-sctp |
 | No real priority between reliable and unreliable | Per-peer pacer: reliable first, unreliable fills the rest |
 
 ## The numbers
@@ -24,7 +24,7 @@ At 200 ms RTT and 5% loss, with a real headless Chrome client:
 | setup | ping p50 | ping p95 |
 |---|---|---|
 | node-datachannel, naive | 13.6 s | 26.3 s |
-| lagless spike (drop gate + RACK + pacer) | **209 ms** | **354 ms** |
+| lagless (gate + RACK-TLP + pacer) | **209 ms** | **354 ms** |
 
 Full tables are on the [Benchmarks](/lagless/docs/benchmarks/) page.
 

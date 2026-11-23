@@ -98,7 +98,7 @@ const features = [
                         <a class="btn p" href={`${base}/docs/`}>Get started</a>
                         <a class="btn" href={`${base}/docs/benchmarks/`}>Benchmarks</a>
                     </div>
-                    <p class="status">Pre-release. Not on npm yet.</p>
+                    <p class="status">v0.1.0. Not on npm yet.</p>
                 </section>
 
                 <section class="features">
@@ -121,11 +121,11 @@ const features = [
                         <a href={`${base}/docs/api/`}>API reference →</a>
                     </div>
                     <pre><code><span class="c">// every tick, per player</span>
-<span class="k">for</span> (<span class="k">const</span> m <span class="k">of</span> server.drain()) onMessage(m);
-
-server.send(peer, <span class="s">"r"</span>, events);
-<span class="k">if</span> (!server.send(peer, <span class="s">"u"</span>, snapshot())) {"{"}
-  owed.add(peer); <span class="c">// resend fresher state next tick</span>
+server.send(peer, <span class="s">"reliable"</span>, events, <span class="k">false</span>);
+<span class="k">for</span> (<span class="k">const</span> snap <span class="k">of</span> snapshots) {"{"}
+  <span class="k">if</span> (!server.send(peer, <span class="s">"state"</span>, snap, <span class="k">false</span>)) {"{"}
+    <span class="k">break</span>; <span class="c">// dropped: send fresher state next tick</span>
+  {"}"}
 {"}"}</code></pre>
                 </section>
             </main>

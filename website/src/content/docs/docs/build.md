@@ -1,41 +1,52 @@
 ---
 title: Build from source
-description: "How to build the lagless native addon from source."
+description: "How to build, test and release lagless from source."
 ---
 
-lagless carries patches on top of webrtc-rs `rtc`, so building from source is a supported path. Prebuilt binaries will ship with v1.
+lagless isn't published to npm yet. Prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64 will ship with the first release.
 
 ## Requirements
 
 - Rust (stable) and Cargo
-- Node.js 22+
-- A checkout of [webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) with the lagless patches applied
+- Node.js 18+
+- pnpm
 
-## rtc patches
-
-The spike runs on `rtc` at commit `0fbcaa7` with four patches:
-
-1. `rtc-sctp` tests bind IPv4 loopback (for containers with no IPv6).
-2. RACK-TLP loss detection (RFC 8985), off by default (`TransportConfig::with_rack`, `SettingEngine::with_sctp_rack`), plus `with_rto_min`.
-3. RACK doesn't cut cwnd for losses of chunks that won't be retransmitted.
-4. Live SCTP sender state exposed for apps (`Association::transport_stats()`, `RTCPeerConnection::sctp_transport_stats()`).
-
-## Build the spike
+## Build and test
 
 ```sh
-# native/Cargo.toml expects webrtc-rs/rtc at ../vendor/rtc (commit 0fbcaa7, patches applied)
-cd native
-cargo build --release
-cp target/release/libspike_native.so ../harness/spike_native.node
+pnpm install
+pnpm build        # napi build --platform --release
+pnpm test         # loopback e2e against node-datachannel
+pnpm test:rust    # pacer unit tests + 214 vendored rtc-sctp tests
 ```
 
-## Run the benchmark matrix
+## The vendored rtc stack
+
+[webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) is vendored in `vendor/rtc` at upstream commit `0fbcaa7` (v0.21.1), with four patches from `vendor/patches/`:
+
+| patch | what |
+|---|---|
+| 0001 | rtc-sctp tests bind IPv4 loopback (CI containers without IPv6) |
+| 0002 | RACK-TLP loss detection (RFC 8985), behind `TransportConfig::with_rack` / `SettingEngine::with_sctp_rack`, plus a configurable RTO min |
+| 0003 | Losses of chunks that won't be retransmitted don't cut cwnd |
+| 0004 | `Association::transport_stats()` / `RTCPeerConnection::sctp_transport_stats()`: srtt, min RTT, cwnd, in-flight/pending/acked bytes, RACK and T3 counters |
+
+## Benchmarks
 
 ```sh
-cd harness
-npm i node-datachannel
-./matrix.sh
-node summarize.js results.jsonl
+pnpm add -D playwright && pnpm exec playwright install chromium
+node bench/run.js rtc+rack+pace 1 5 1 45      # kind gate loss% seed seconds [rttMs]
+bench/matrix.sh results.jsonl rtc+rack+pace rtc ndc
+node bench/summarize.js results.jsonl
 ```
 
-The harness runs a real server, a headless Chromium client and a userspace UDP shaper (one-way delay and seeded random loss in both directions).
+Kinds: `ndc` (node-datachannel), `rtc` (lagless, gate only), `+rack`, `+pace`, `+rto<ms>`.
+
+## Release
+
+```sh
+pnpm version patch   # also bumps the npm/* platform packages
+git push --follow-tags
+```
+
+CI builds all five platforms and publishes to npm with trusted publishing.

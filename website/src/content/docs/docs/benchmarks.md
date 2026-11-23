@@ -1,11 +1,11 @@
 ---
 title: Benchmarks
-description: "lagless spike results vs node-datachannel at 200 ms RTT under packet loss."
+description: "lagless results vs node-datachannel at 200 ms RTT under packet loss."
 ---
 
 ## Setup
 
-- **Server:** the lagless spike (napi-rs over webrtc-rs `rtc` @ `0fbcaa7`), single peer.
+- **Server:** lagless (napi-rs over webrtc-rs `rtc` @ `0fbcaa7`), single peer.
 - **Baseline:** node-datachannel 0.33.6.
 - **Client:** real headless Chromium (dcSCTP). Channel `u` is unordered with `maxRetransmits: 0`, channel `r` is reliable and ordered.
 - **Shaper:** userspace UDP, 100 ms each way, seeded random loss in both directions. No rate cap.
@@ -46,4 +46,7 @@ At 0% loss every config sits at about 207 ms ping and 103 ms state age.
 
 - Single peer, Chrome client, random loss only. No bandwidth cap or bufferbloat test yet.
 - The node-datachannel gate didn't reproduce an earlier in-game win with this harness. Treat those rows as "this harness".
-- lagless adds about 6 ms at 0% loss from the spike's 1 ms poll loop.
+- lagless adds about 6 ms at 0% loss from its 1 ms poll loop.
+- The node-datachannel rows come from the first harness run, which sent unreliable before reliable each tick. The lagless pacer rows send reliable first.
+
+Raw data and the harness are in [`bench/`](https://github.com/stasadance/lagless/tree/main/bench). See [Build from source](/lagless/docs/build/#benchmarks) to run it.

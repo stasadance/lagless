@@ -4,16 +4,16 @@ description: "lagless internals: the rtc sans-IO core, RACK-TLP and the per-peer
 ---
 
 ```
-JS/TS API (node-datachannel-ish + game mode)
-  send(peer, chan, buf) -> bool (false = dropped, keep owed)
-  budget(peer)          -> bytes allowed this tick
-  stats(peer)           -> true queue, cwnd, srtt, minRtt, counters
-  drain()               -> batched messages (one N-API call per tick)
+Node API
+  send(peer, label, buf, exempt) -> bool (false = dropped, keep owed)
+  budget(peer)                   -> bytes allowed right now
+  stats(peer)                    -> true queue, cwnd, srtt, minRtt, counters
+  drain()                        -> every inbound message, one N-API call
 napi-rs bridge
-Rust core
-  webrtc-rs rtc (patched): ICE-lite, DTLS, SCTP + RACK-TLP, exposed sender state
+Rust core, one worker thread + one UDP socket per peer
+  webrtc-rs rtc (vendored, patched): ICE-lite, DTLS, SCTP + RACK-TLP, exposed sender state
   own UDP loop and clock (sans-IO)
-  per-peer pacer: delay-based budget, reliable first, probe exemption
+  true-queue gate (64 KiB) + per-peer pacer
 ```
 
 ## Why `rtc`

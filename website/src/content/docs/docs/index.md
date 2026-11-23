@@ -7,8 +7,8 @@ lagless is a Node.js server module for WebRTC data channels, built for real-time
 
 The goal: ping stays near the real round-trip time even at 5% packet loss, instead of spiking to seconds.
 
-:::caution[Pre-release]
-lagless isn't on npm yet. The spike is done and measured (see [Benchmarks](/lagless/docs/benchmarks/)), and v1 is in progress. The API on these pages is the spike's and may change.
+:::note[v0.1.0]
+lagless isn't published to npm yet. Until it is, [build it from source](/lagless/docs/build/).
 :::
 
 ## What you get
@@ -18,8 +18,10 @@ lagless isn't on npm yet. The spike is done and measured (see [Benchmarks](/lagl
 - **Modern loss recovery.** RACK-TLP (RFC 8985) in our `rtc-sctp` patches, so a lost packet doesn't wait for a 1 s retransmission timeout.
 - **Per-peer pacer.** A delay-based send budget keeps the network queue near zero, gives reliable messages their share first, and lets unreliable state fill the rest.
 - **Probe exemption.** Pings skip the drop gate so they measure the real queue.
-- **Strict config.** Unknown or unsupported options throw instead of being ignored.
 
-## Honest limit
+## Limits (v1)
 
-lagless controls the **server to client** direction, which is where heavy snapshot traffic goes. The **client to server** direction is the browser's own SCTP stack (Chrome's dcSCTP), which no server library can change.
+- One worker thread and one UDP socket per peer. No single-port mux yet.
+- Host candidate only (no STUN/TURN gathering on the server) and non-trickle offers.
+- lagless controls the **server to client** direction, which is where heavy snapshot traffic goes. The **client to server** direction is the browser's own SCTP stack (Chrome's dcSCTP), which no server library can change.
+- Tested on Linux x64. Prebuilt targets: Linux x64/arm64, macOS x64/arm64, Windows x64.
