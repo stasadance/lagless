@@ -1,0 +1,58 @@
+{
+  "name": "lagless",
+  "version": "0.1.0",
+  "description": "Low-latency WebRTC data channels for real-time games. Rust (webrtc-rs) native module for Node.js.",
+  "main": "index.js",
+  "types": "index.d.ts",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stasadance/lagless.git"
+  },
+  "keywords": [
+    "webrtc",
+    "datachannel",
+    "udp",
+    "game",
+    "netcode",
+    "sctp",
+    "napi",
+    "rust"
+  ],
+  "engines": {
+    "node": ">= 18"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
+  "napi": {
+    "binaryName": "lagless",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "aarch64-unknown-linux-gnu",
+      "x86_64-apple-darwin",
+      "aarch64-apple-darwin",
+      "x86_64-pc-windows-msvc"
+    ]
+  },
+  "scripts": {
+    "build": "napi build --platform --release",
+    "build:debug": "napi build --platform",
+    "test": "node --test test/*.test.js",
+    "test:rust": "cargo test --release && cargo test --manifest-path vendor/rtc/rtc-sctp/Cargo.toml",
+    "bench": "node bench/run.js",
+    "version": "napi version"
+  },
+  "devDependencies": {
+    "@napi-rs/cli": "3.11.0",
+    "node-datachannel": "0.33.6"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "node-datachannel"
+    ]
+  }
+}
