@@ -10,7 +10,7 @@ const description =
 const features = [
     {
         title: "True send queue",
-        body: "Stack queue, in-flight bytes, cwnd, srtt and min RTT straight from the SCTP association. No hidden buffer.",
+        body: "Stack queue, in-flight bytes, cwnd, srtt and min RTT come straight from the SCTP association. No hidden buffer.",
     },
     {
         title: "Drop on backpressure",
@@ -53,102 +53,147 @@ const features = [
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
         <link
-            href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap"
+            href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap"
             rel="stylesheet"
         />
     </head>
     <body>
-        <div class="glow" aria-hidden="true"></div>
-        <header class="nav">
-            <a href={`${base}/`} class="brand">lagless</a>
-            <nav>
-                <a href={`${base}/docs/`}>Docs</a>
-                <a href={`${base}/docs/benchmarks/`}>Benchmarks</a>
-                <a href={repo} class="gh">GitHub</a>
-            </nav>
-        </header>
+        <div class="page">
+            <header class="nav">
+                <a href={`${base}/`} class="brand">
+                    <img src={`${base}/favicon.svg`} alt="" width="28" height="28" />
+                    lagless
+                </a>
+                <nav>
+                    <a href={`${base}/docs/`}>Docs</a>
+                    <a href={`${base}/docs/benchmarks/`}>Benchmarks</a>
+                    <a href={repo}>GitHub</a>
+                </nav>
+            </header>
 
-        <main>
-            <section class="hero">
-                <h1>
-                    5% packet loss,
-                    <br />
-                    <span class="grad">no ping spikes.</span>
-                </h1>
-                <p class="lede">
-                    lagless is a Node.js module for fast WebRTC data channels in io games. Rust
-                    under the hood, built to keep ping near the real RTT on bad connections.
-                </p>
-                <div class="stats">
-                    <div>
-                        <span class="num">13.6 s</span>
-                        <span class="lbl">node-datachannel ping p50</span>
-                    </div>
-                    <div>
-                        <span class="num grad">209 ms</span>
-                        <span class="lbl">lagless ping p50</span>
-                    </div>
-                    <div>
-                        <span class="num grad">354 ms</span>
-                        <span class="lbl">lagless ping p95</span>
-                    </div>
-                </div>
-                <p class="platforms">200 ms RTT, 5% loss both ways, headless Chrome client</p>
-                <div class="cta">
-                    <a class="btn primary" href={`${base}/docs/`}>Read the docs</a>
-                    <a class="btn" href={`${base}/docs/benchmarks/`}>See the benchmarks</a>
-                </div>
-                <p class="platforms">Pre-release. Not on npm yet.</p>
-            </section>
-
-            <section class="features">
-                {features.map((f) => (
-                    <article>
-                        <h3>{f.title}</h3>
-                        <p>{f.body}</p>
-                    </article>
-                ))}
-            </section>
-
-            <section class="config">
-                <div>
-                    <h2>Send fresh, never stale</h2>
-                    <p>
-                        <code>send()</code> tells you when unreliable state wasn't queued. Keep it
-                        owed, and next tick send the newest version instead of piling up old
-                        snapshots behind a lost packet.
+            <main>
+                <section class="hero">
+                    <h1>Same 5% loss.<br />One of these is lagless.</h1>
+                    <p class="lede">
+                        WebRTC data channels for io games, with a Rust core and a Node.js API. Ping
+                        stays near the real round trip when the connection drops packets.
                     </p>
-                    <a href={`${base}/docs/api/`}>API reference →</a>
-                </div>
-                <pre><code><span class="c">// every tick, per player</span>
+                    <div class="lanes">
+                        <div class="lane old">
+                            <span class="name">classic SCTP</span>
+                            <div class="track"><div class="dot" id="d-old"></div></div>
+                            <span class="ms">13.6 s</span>
+                        </div>
+                        <div class="lane new">
+                            <span class="name">lagless</span>
+                            <div class="track"><div class="dot" id="d-new"></div></div>
+                            <span class="ms">209 ms</span>
+                        </div>
+                    </div>
+                    <p class="note">
+                        Ping p50 at 200 ms RTT and 5% loss.{" "}
+                        <a href={`${base}/docs/benchmarks/`}>Full setup</a>
+                    </p>
+                    <div class="btns">
+                        <a class="btn p" href={`${base}/docs/`}>Get started</a>
+                        <a class="btn" href={`${base}/docs/benchmarks/`}>Benchmarks</a>
+                    </div>
+                    <p class="status">Pre-release. Not on npm yet.</p>
+                </section>
+
+                <section class="features">
+                    {features.map((f) => (
+                        <article>
+                            <h2>{f.title}</h2>
+                            <p>{f.body}</p>
+                        </article>
+                    ))}
+                </section>
+
+                <section class="code">
+                    <div>
+                        <h2>Send fresh, never stale</h2>
+                        <p>
+                            <code>send()</code> tells you when unreliable state wasn't queued. Keep
+                            it owed, and next tick send the newest version instead of piling up old
+                            snapshots behind a lost packet.
+                        </p>
+                        <a href={`${base}/docs/api/`}>API reference →</a>
+                    </div>
+                    <pre><code><span class="c">// every tick, per player</span>
 <span class="k">for</span> (<span class="k">const</span> m <span class="k">of</span> server.drain()) onMessage(m);
 
 server.send(peer, <span class="s">"r"</span>, events);
 <span class="k">if</span> (!server.send(peer, <span class="s">"u"</span>, snapshot())) {"{"}
   owed.add(peer); <span class="c">// resend fresher state next tick</span>
 {"}"}</code></pre>
-            </section>
-        </main>
+                </section>
+            </main>
 
-        <footer>
-            <p>
+            <script>
+                const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
+                const o = document.getElementById("d-old")!;
+                const n = document.getElementById("d-new")!;
+                const place = (el: HTMLElement, f: number) =>
+                    (el.style.left = `calc(${f} * (100% - 24px))`);
+                place(o, 0.42);
+                place(n, 0.78);
+                if (!still) {
+                    const t0 = performance.now();
+                    let oldPos = 0;
+                    let nextJump = 0;
+                    const tick = (t: number) => {
+                        const f = ((t - t0) / 4000) % 1;
+                        place(n, f);
+                        if (f < 0.02) oldPos = 0;
+                        else if (t > nextJump) {
+                            oldPos = f;
+                            nextJump = t + 600 + Math.random() * 1400;
+                        }
+                        place(o, oldPos);
+                        requestAnimationFrame(tick);
+                    };
+                    requestAnimationFrame(tick);
+                }
+            </script>
+
+            <footer>
                 Built on <a href="https://github.com/webrtc-rs/rtc">webrtc-rs rtc</a> and{" "}
                 <a href="https://napi.rs">napi-rs</a>.
-            </p>
-        </footer>
+            </footer>
+        </div>
     </body>
 </html>
 
 <style is:global>
     :root {
-        --bg: #09080b;
-        --fg: #f4f4f6;
-        --muted: #a19fab;
-        --line: #24212b;
-        --card: #121016;
-        --pink: #f81ce5;
-        --violet: #7b5cff;
-        color-scheme: dark;
+        --bg: #eef2f7;
+        --ink: #1238c4;
+        --fg: #0c1633;
+        --dim: #5a6580;
+        --rule: #c4cfe3;
+        --code: #e2e8f2;
+        --track: #dbe3f3;
+        --card: #f7f9fc;
+        --bad: #c2412d;
+        --sans: "IBM Plex Sans", system-ui, sans-serif;
+        --mono: "IBM Plex Mono", ui-monospace, monospace;
+        --display: "Archivo", "IBM Plex Sans", system-ui, sans-serif;
+        color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+        :root {
+            --bg: #0a1024;
+            --ink: #7f9bff;
+            --fg: #e6ebf7;
+            --dim: #8f9bb8;
+            --rule: #1f2a4d;
+            --code: #111a36;
+            --track: #16214a;
+            --card: #0f1730;
+            --bad: #ff8a73;
+            color-scheme: dark;
+        }
     }
     * {
         box-sizing: border-box;
@@ -160,329 +205,225 @@ server.send(peer, <span class="s">"r"</span>, events);
         color: var(--fg);
     }
     body {
-        font:
-            16px/1.6 Inter,
-            system-ui,
-            sans-serif;
+        font: 16px/1.6 var(--sans);
         -webkit-font-smoothing: antialiased;
-        overflow-x: hidden;
     }
     a {
-        color: inherit;
+        color: var(--ink);
     }
     code,
     pre {
-        font-family: "JetBrains Mono", ui-monospace, monospace;
+        font-family: var(--mono);
     }
 </style>
 
 <style>
-    .glow {
-        position: absolute;
-        inset: -20vh 0 auto;
-        height: 90vh;
-        pointer-events: none;
-        background:
-            radial-gradient(40% 50% at 30% 30%, rgba(248, 28, 229, 0.22), transparent 70%),
-            radial-gradient(40% 50% at 70% 25%, rgba(123, 92, 255, 0.25), transparent 70%);
-        filter: blur(20px);
+    .page {
+        max-width: 1120px;
+        margin: 0 auto;
+        padding: 0 max(16px, env(safe-area-inset-left, 0px));
     }
     .nav {
-        position: relative;
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 20px 16px;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        flex-wrap: wrap;
+        gap: 12px;
+        padding: 20px 0 12px;
+        border-bottom: 2px solid var(--ink);
+    }
+    .brand {
         display: flex;
         align-items: center;
-        justify-content: space-between;
+        gap: 10px;
+        font: 800 22px var(--display);
+        color: var(--fg);
+        text-decoration: none;
+        letter-spacing: -0.02em;
     }
     .nav nav {
         display: flex;
-        gap: 24px;
-        font-size: 15px;
+        gap: 20px;
+        font: 14px var(--mono);
     }
     .nav nav a {
+        color: var(--dim);
         text-decoration: none;
-        color: var(--muted);
     }
     .nav nav a:hover {
-        color: var(--fg);
-    }
-    .brand {
-        font-weight: 700;
-        font-size: 22px;
-        letter-spacing: -0.02em;
-        text-decoration: none;
-    }
-    .stats {
-        display: flex;
-        gap: 16px;
-        justify-content: center;
-        flex-wrap: wrap;
-        margin: 0 auto;
-    }
-    .stats div {
-        min-width: 160px;
-        padding: 16px 20px;
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-        display: flex;
-        flex-direction: column;
-    }
-    .stats .num {
-        font-size: 32px;
-        font-weight: 700;
-        letter-spacing: -0.02em;
-    }
-    .stats .lbl {
-        color: var(--muted);
-        font-size: 14px;
-    }
-    main {
-        position: relative;
-        max-width: 1200px;
-        margin: 0 auto;
-        padding: 0 16px;
+        color: var(--ink);
     }
     .hero {
-        text-align: center;
-        padding: 72px 0 40px;
+        padding: 72px 0 56px;
+        border-bottom: 1px solid var(--rule);
     }
     h1 {
-        font-size: clamp(32px, 8.5vw, 76px);
-        line-height: 1.05;
+        font: 900 clamp(36px, 6.5vw, 68px) / 1 var(--display);
         letter-spacing: -0.03em;
-        margin: 0 0 20px;
-        font-weight: 700;
-    }
-    .grad {
-        background: linear-gradient(90deg, var(--pink), var(--violet));
-        -webkit-background-clip: text;
-        background-clip: text;
-        color: transparent;
+        margin: 0 0 16px;
+        text-wrap: balance;
     }
     .lede {
-        max-width: 620px;
-        margin: 0 auto 32px;
-        color: var(--muted);
+        color: var(--dim);
         font-size: 18px;
+        max-width: 52ch;
+        margin: 0;
     }
-    .cta {
+    .lanes {
+        display: grid;
+        gap: 14px;
+        margin: 40px 0 12px;
+    }
+    .lane {
+        display: grid;
+        grid-template-columns: minmax(96px, 160px) 1fr auto;
+        gap: 16px;
+        align-items: center;
+        font: 14px var(--mono);
+    }
+    .lane > * {
+        min-width: 0;
+    }
+    .track {
+        position: relative;
+        height: 34px;
+        background: var(--track);
+        border-radius: 17px;
+        overflow: hidden;
+    }
+    .dot {
+        position: absolute;
+        top: 5px;
+        left: 0;
+        width: 24px;
+        height: 24px;
+        border-radius: 50%;
+    }
+    .old .dot {
+        background: var(--bad);
+    }
+    .new .dot {
+        background: var(--ink);
+    }
+    .ms {
+        font-weight: 600;
+        font-variant-numeric: tabular-nums;
+        min-width: 64px;
+        text-align: right;
+    }
+    .old .ms {
+        color: var(--bad);
+    }
+    .new .ms {
+        color: var(--ink);
+    }
+    .note {
+        font: 13px var(--mono);
+        color: var(--dim);
+        margin: 0 0 32px;
+    }
+    .btns {
         display: flex;
         gap: 12px;
-        justify-content: center;
         flex-wrap: wrap;
     }
     .btn {
-        padding: 12px 22px;
-        border-radius: 10px;
+        font: 600 15px var(--sans);
+        padding: 11px 20px;
+        border-radius: 8px;
         text-decoration: none;
-        font-weight: 600;
-        border: 1px solid var(--line);
-        background: var(--card);
+        border: 1.5px solid var(--ink);
+        color: var(--ink);
     }
-    .btn:hover {
-        border-color: #3a3642;
+    .btn.p {
+        background: var(--ink);
+        color: var(--bg);
     }
-    .btn.primary {
-        border: 0;
-        background: linear-gradient(90deg, var(--pink), var(--violet));
-        color: #fff;
-    }
-    .btn.primary:hover {
-        filter: brightness(1.1);
-    }
-    .install {
-        max-width: 560px;
-        margin: 0 auto 24px;
-        text-align: left;
-    }
-    .os-tabs {
-        display: flex;
-        gap: 4px;
-        margin-bottom: 8px;
-        justify-content: center;
-    }
-    .os-tabs button {
-        font: inherit;
-        font-size: 13px;
-        color: var(--muted);
-        background: none;
-        border: 0;
-        padding: 4px 10px;
-        border-radius: 6px;
-        cursor: pointer;
-    }
-    .os-tabs button[aria-selected="true"] {
-        color: var(--fg);
-        background: var(--card);
-    }
-    .cmd {
-        display: flex;
-        align-items: center;
-        gap: 12px;
-        padding: 12px 12px 12px 16px;
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 10px;
-    }
-    .cmd code {
-        flex: 1;
-        min-width: 0;
-        font-size: 14px;
-        white-space: nowrap;
-        overflow-x: auto;
-        display: none;
-    }
-    .install[data-os="unix"] [data-for="unix"],
-    .install[data-os="windows"] [data-for="windows"] {
-        display: block;
-    }
-    .prompt {
-        color: var(--muted);
-        user-select: none;
-        margin-right: 8px;
-    }
-    .copy {
-        font: inherit;
-        font-size: 13px;
-        font-weight: 600;
-        color: var(--fg);
-        cursor: pointer;
-        background: none;
-        border: 1px solid var(--line);
-        border-radius: 6px;
-        padding: 4px 10px;
-    }
-    .copy:hover {
-        border-color: #3a3642;
-    }
-    .platforms {
-        color: var(--muted);
-        font-size: 14px;
-        margin: 16px 0 56px;
-    }
-    .shot img {
-        width: 100%;
-        height: auto;
-        border-radius: 12px;
-        box-shadow:
-            0 40px 120px -20px rgba(123, 92, 255, 0.45),
-            0 0 0 1px rgba(255, 255, 255, 0.06);
+    .status {
+        margin: 20px 0 0;
+        font: 13px var(--mono);
+        color: var(--dim);
     }
     .features {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
         gap: 16px;
-        padding: 64px 0;
+        padding: 56px 0;
+        border-bottom: 1px solid var(--rule);
     }
     .features article {
         background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 14px;
+        border: 1px solid var(--rule);
+        border-radius: 12px;
         padding: 24px;
     }
-    .features h3 {
+    .features h2 {
+        font: 800 20px var(--display);
         margin: 0 0 8px;
-        font-size: 18px;
+        letter-spacing: -0.01em;
     }
     .features p {
         margin: 0;
-        color: var(--muted);
+        color: var(--dim);
     }
-    .config {
+    .code {
         display: grid;
         grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
         gap: 40px;
         align-items: center;
-        padding: 32px 0 96px;
+        padding: 64px 0 80px;
     }
-    .config > * {
+    .code > * {
         min-width: 0;
     }
-    .config h2 {
-        font-size: 32px;
+    .code h2 {
+        font: 800 32px var(--display);
         letter-spacing: -0.02em;
         margin: 0 0 12px;
     }
-    .config p {
-        color: var(--muted);
+    .code p {
+        color: var(--dim);
     }
-    .config a {
-        color: #c9a8ff;
-        text-decoration: none;
+    .code > div > a {
         font-weight: 600;
+        text-decoration: none;
     }
-    .config pre {
+    pre {
         margin: 0;
         padding: 24px;
-        border-radius: 14px;
-        background: var(--card);
-        border: 1px solid var(--line);
+        background: var(--code);
+        border-left: 3px solid var(--ink);
         font-size: 14px;
         line-height: 1.7;
         overflow-x: auto;
     }
-    .config code {
-        font-size: 0.9em;
-    }
     .c {
-        color: #6b6875;
+        color: var(--dim);
     }
     .k {
-        color: #ff8fe9;
+        color: var(--ink);
+        font-weight: 600;
     }
     .s {
-        color: #b5f4a5;
-    }
-    .n {
-        color: #c9a8ff;
-    }
-    .support {
-        text-align: center;
-        max-width: 720px;
-        margin: 0 auto 96px;
-        padding: 40px 24px;
-        background: var(--card);
-        border: 1px solid var(--line);
-        border-radius: 14px;
-    }
-    .support h2 {
-        font-size: 32px;
-        letter-spacing: -0.02em;
-        margin: 0 0 12px;
-    }
-    .support p {
-        color: var(--muted);
-        margin: 0 auto 24px;
-        max-width: 560px;
-    }
-    .support .btn {
-        display: inline-block;
+        color: var(--bad);
     }
     footer {
-        border-top: 1px solid var(--line);
-        text-align: center;
-        color: var(--muted);
-        font-size: 14px;
-        padding: 32px 16px;
+        border-top: 2px solid var(--ink);
+        padding: 24px 0 40px;
+        font: 13px var(--mono);
+        color: var(--dim);
     }
     @media (max-width: 600px) {
-        .nav {
-            gap: 12px;
+        .lane {
+            grid-template-columns: 1fr auto;
+            row-gap: 6px;
         }
-        .nav nav {
-            gap: 14px;
-            font-size: 14px;
-        }
-        .cmd code {
-            font-size: 13px;
-            white-space: normal;
-            overflow-wrap: anywhere;
+        .track {
+            grid-column: 1 / -1;
+            grid-row: 2;
         }
         .hero {
-            padding-top: 40px;
+            padding: 40px 0;
         }
     }
 </style>

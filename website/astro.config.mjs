@@ -11,7 +11,17 @@ export default defineConfig({
             title: "lagless",
             description:
                 "Low-latency WebRTC data channels for real-time games, in Rust for Node.js. No ping spikes under packet loss.",
+            logo: { src: "./src/assets/mark.svg" },
             favicon: "/favicon.svg",
+            head: [
+                {
+                    tag: "link",
+                    attrs: {
+                        rel: "stylesheet",
+                        href: "https://fonts.googleapis.com/css2?family=Archivo:wght@500;800&family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@400;600&display=swap",
+                    },
+                },
+            ],
             social: [
                 { icon: "github", label: "GitHub", href: "https://github.com/stasadance/lagless" },
             ],
