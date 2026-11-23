@@ -91,6 +91,15 @@ pnpm test:rust    # pacer unit tests + 214 vendored rtc-sctp tests
 
 The patched `rtc` stack is vendored in [`vendor/`](vendor/README.md).
 
+## Release
+
+Bump the version and push the tag. CI builds all five platforms and publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token). Each of the 6 packages (`lagless` + `lagless-<platform>`) needs a trusted publisher on npmjs.com pointing at `stasadance/lagless`, workflow `release.yml`.
+
+```sh
+pnpm version patch   # also bumps npm/* platform packages
+git push --follow-tags
+```
+
 ## License
 
 MIT. The vendored `rtc` stack in `vendor/` keeps its upstream MIT OR Apache-2.0 license.

@@ -1,0 +1,33 @@
+{
+  "name": "lagless-darwin-x64",
+  "version": "0.1.0",
+  "cpu": [
+    "x64"
+  ],
+  "main": "lagless.darwin-x64.node",
+  "files": [
+    "lagless.darwin-x64.node"
+  ],
+  "description": "Low-latency WebRTC data channels for real-time games. Rust (webrtc-rs) native module for Node.js.",
+  "keywords": [
+    "webrtc",
+    "datachannel",
+    "udp",
+    "game",
+    "netcode",
+    "sctp",
+    "napi",
+    "rust"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">= 18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stasadance/lagless.git"
+  },
+  "os": [
+    "darwin"
+  ]
+}
