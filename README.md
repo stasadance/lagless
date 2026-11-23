@@ -83,10 +83,10 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 ## Build
 
 ```sh
-npm install
-npm run build        # napi build --platform --release
-npm test             # loopback e2e against node-datachannel
-npm run test:rust    # pacer unit tests + 214 vendored rtc-sctp tests
+pnpm install
+pnpm build        # napi build --platform --release
+pnpm test         # loopback e2e against node-datachannel
+pnpm test:rust    # pacer unit tests + 214 vendored rtc-sctp tests
 ```
 
 The patched `rtc` stack is vendored in [`vendor/`](vendor/README.md).

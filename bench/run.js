@@ -1,7 +1,7 @@
 // One run: headless Chromium client <-> UDP shaper <-> server. Prints one JSON result line.
 // usage: node bench/run.js <kind> <gate 0|1> <lossPct> <seed> <durSec> [rttMs] [uKBps] [rKBps]
 //   kind: ndc (node-datachannel baseline) | rtc[+rack][+pace][+rto<ms>] (lagless with features on)
-// needs playwright + chromium: npm i --no-save playwright && npx playwright install chromium
+// needs playwright + chromium: pnpm add -D playwright && pnpm exec playwright install chromium
 const { chromium } = require('playwright');
 const { createShaper } = require('./shaper');
 const { rtcServer, ndcServer } = require('./servers');

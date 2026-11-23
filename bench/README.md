@@ -6,7 +6,7 @@ ping every 200 ms on the unreliable channel. Reports ping, one-way state/reliabl
 and goodput.
 
 ```sh
-npm i --no-save playwright && npx playwright install chromium
+pnpm add -D playwright && pnpm exec playwright install chromium
 node bench/run.js rtc+rack+pace 1 5 1 45      # kind gate loss% seed seconds [rttMs]
 bench/matrix.sh results.jsonl rtc+rack+pace rtc ndc   # LOSSES, SEEDS, DUR, RTT, GATE env
 node bench/summarize.js results.jsonl

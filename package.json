@@ -5,10 +5,28 @@
   "main": "index.js",
   "types": "index.d.ts",
   "license": "MIT",
-  "repository": { "type": "git", "url": "git+https://github.com/stasadance/lagless.git" },
-  "keywords": ["webrtc", "datachannel", "udp", "game", "netcode", "sctp", "napi", "rust"],
-  "engines": { "node": ">= 18" },
-  "files": ["index.js", "index.d.ts", "*.node"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stasadance/lagless.git"
+  },
+  "keywords": [
+    "webrtc",
+    "datachannel",
+    "udp",
+    "game",
+    "netcode",
+    "sctp",
+    "napi",
+    "rust"
+  ],
+  "engines": {
+    "node": ">= 18"
+  },
+  "files": [
+    "index.js",
+    "index.d.ts",
+    "*.node"
+  ],
   "napi": {
     "binaryName": "lagless",
     "targets": [
@@ -29,5 +47,11 @@
   "devDependencies": {
     "@napi-rs/cli": "3.11.0",
     "node-datachannel": "0.33.6"
+  },
+  "packageManager": "pnpm@10.28.0",
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "node-datachannel"
+    ]
   }
 }
