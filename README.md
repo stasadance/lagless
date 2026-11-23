@@ -93,4 +93,4 @@ The patched `rtc` stack is vendored in [`vendor/`](vendor/README.md).
 
 ## License
 
-MIT OR Apache-2.0
+MIT. The vendored `rtc` stack in `vendor/` keeps its upstream MIT OR Apache-2.0 license.

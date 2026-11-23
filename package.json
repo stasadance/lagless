@@ -4,7 +4,7 @@
   "description": "Low-latency WebRTC data channels for real-time games. Rust (webrtc-rs) native module for Node.js.",
   "main": "index.js",
   "types": "index.d.ts",
-  "license": "MIT OR Apache-2.0",
+  "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/stasadance/lagless.git" },
   "keywords": ["webrtc", "datachannel", "udp", "game", "netcode", "sctp", "napi", "rust"],
   "engines": { "node": ">= 18" },
