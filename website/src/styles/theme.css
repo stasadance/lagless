@@ -1,0 +1,18 @@
+/* lagless brand: same pink to violet on near-black as vanitty. */
+:root {
+    --sl-color-accent-low: #2a1338;
+    --sl-color-accent: #b23cf2;
+    --sl-color-accent-high: #f3c8ff;
+    --sl-font: "Inter", system-ui, sans-serif;
+    --sl-font-mono: "JetBrains Mono", ui-monospace, monospace;
+}
+:root:not([data-theme="light"]) {
+    --sl-color-black: #09080b;
+    --sl-color-gray-6: #16141b;
+    --sl-color-gray-5: #24212b;
+}
+:root[data-theme="light"] {
+    --sl-color-accent-low: #f6dcff;
+    --sl-color-accent: #8a1fd1;
+    --sl-color-accent-high: #3d0a5e;
+}
