@@ -14,9 +14,19 @@ async function waitFor(what, fn, ms = 10000) {
   }
 }
 
-test('client connects, both channels carry data both ways', async () => {
+test('client connects, both channels carry data both ways', { timeout: 30000 }, async () => {
   const server = new Server();
   const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    await exchange(server, pc);
+  } finally {
+    pc.close();
+    server.closeAll();
+    ndc.cleanup();
+  }
+});
+
+async function exchange(server, pc) {
   const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
   const r = pc.createDataChannel('r');
   const got = { u: [], r: [] };
@@ -60,11 +70,7 @@ test('client connects, both channels carry data both ways', async () => {
   assert.strictEqual(st.closed, false);
   assert.ok(st.rate > 0, 'pacer rate');
   assert.strictEqual(typeof server.budget(acc.peer), 'number');
-
-  pc.close();
-  server.closeAll();
-  ndc.cleanup();
-});
+}
 
 test('unknown channel and unknown peer are errors', () => {
   const server = new Server({ pacer: false, rack: false, unreliableLimit: 0 });

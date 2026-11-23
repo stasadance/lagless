@@ -345,6 +345,9 @@ fn worker(
     let mut ids: HashMap<String, _> = HashMap::new();
     let mut deadline: Option<Instant> = None;
     let mut pacer = pacer::Pacer::new(Instant::now());
+    if pacer_on {
+        sh.rate.store(pacer.rate as u64, Ordering::Relaxed);
+    }
     let mut last_stats = Instant::now();
 
     loop {
