@@ -13,7 +13,7 @@ The goal: ping stays near the real round-trip time even at 5% packet loss, inste
 pnpm add lagless
 ```
 
-Node.js 18+. Prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. On anything else, [build from source](/lagless/docs/build/). Then head to the [API](/lagless/docs/api/).
+Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. On anything else, [build from source](/lagless/docs/build/). Then head to the [API](/lagless/docs/api/).
 
 ## What you get
 

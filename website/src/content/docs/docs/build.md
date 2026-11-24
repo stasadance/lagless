@@ -3,7 +3,7 @@ title: Build from source
 description: "How to build, test and release lagless from source."
 ---
 
-The npm package ships prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. Build from source on other platforms, or to work on lagless itself.
+The npm package bundles prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. Build from source on other platforms, or to work on lagless itself.
 
 ## Requirements
 
@@ -50,4 +50,4 @@ pnpm version patch
 git push --follow-tags
 ```
 
-CI builds all five platforms and publishes to npm with trusted publishing. The per-platform packages are generated in the release job.
+CI builds all five platforms and publishes a single `lagless` package with every binary bundled, using trusted publishing.
