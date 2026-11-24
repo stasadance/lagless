@@ -1,12 +1,13 @@
 import { EventEmitter } from 'node:events';
 import { Server as NativeServer } from '../binding.js';
-import type { Message, PeerStats, ServerOptions as NativeServerOptions } from '../binding.js';
+import type { Event as NativeEvent, PeerStats, ServerOptions } from '../binding.js';
 
-export type { Message, PeerStats };
+export type { PeerStats, ServerOptions };
 
-export interface ServerOptions extends NativeServerOptions {
-  /** How often received messages are pulled from the native side, in ms. Default 1. */
-  drainIntervalMs?: number;
+export interface Message {
+  peer: number;
+  label: string;
+  data: Buffer;
 }
 
 export interface SessionDescription {
@@ -17,7 +18,7 @@ export interface SessionDescription {
 export interface Accepted {
   peer: number;
   answer: SessionDescription;
-  /** UDP port the peer's socket is bound to. */
+  /** UDP port the answer advertises (the server's shared port unless overridden). */
   localPort: number;
 }
 
@@ -26,34 +27,57 @@ export interface SendOptions {
   exempt?: boolean;
 }
 
+/** Why a peer closed: `local` (closePeer/close), `closed` (remote closed), `failed` (ICE/DTLS failed). */
+export type CloseReason = 'local' | 'closed' | 'failed' | (string & {});
+
+export class PeerError extends Error {
+  readonly peer: number;
+  constructor(peer: number, message: string) {
+    super(message);
+    this.peer = peer;
+    this.name = 'PeerError';
+  }
+}
+
 interface Events {
   message: [Message];
+  /** ICE + DTLS connected. */
+  open: [{ peer: number }];
+  /** A data channel is open and can be sent on. */
+  channelopen: [{ peer: number; label: string }];
+  /** The peer is gone and has been removed (send() now throws "no such peer"). */
+  close: [{ peer: number; reason: CloseReason }];
+  /** Something failed for one peer (e.g. rtc refused a send). Only emitted if a listener exists. */
+  error: [PeerError];
 }
 
 /**
- * WebRTC data channel server. One SCTP association per peer.
- * Emits `message` for every message received from any peer.
+ * WebRTC data channel server. One SCTP association per peer, all peers on one UDP
+ * port and one native thread. Received messages and lifecycle events are pushed in
+ * batches from that thread (no polling).
  */
 export class Server extends EventEmitter<Events> {
   readonly native: NativeServer;
-  private readonly drainIntervalMs: number;
-  private timer: NodeJS.Timeout | undefined;
+  private started = false;
 
   constructor(opts: ServerOptions = {}) {
     super();
-    const { drainIntervalMs = 1, ...nativeOpts } = opts;
-    this.native = new NativeServer(nativeOpts);
-    this.drainIntervalMs = drainIntervalMs;
+    this.native = new NativeServer(opts);
+  }
+
+  /** The UDP port every peer shares. */
+  get localPort(): number {
+    return this.native.localPort;
   }
 
   /**
-   * Accept a complete (non-trickle) offer. The answer carries one host candidate
-   * `advertiseIp:advertisePort`; port 0 means the port the peer socket bound to.
+   * Accept a complete (non-trickle) offer. The answer carries one host candidate per
+   * advertise IP (IPv4 and/or IPv6) at `advertisePort`; 0 means the server's port.
    */
-  accept(offer: SessionDescription | string, advertiseIp: string, advertisePort = 0): Accepted {
+  async accept(offer: SessionDescription | string, advertiseIp: string | string[], advertisePort = 0): Promise<Accepted> {
     const offerJson = typeof offer === 'string' ? offer : JSON.stringify(offer);
-    const r = this.native.acceptOffer(offerJson, advertiseIp, advertisePort);
-    this.startDrain();
+    this.start();
+    const r = await this.native.acceptOffer(offerJson, advertiseIp, advertisePort);
     return { peer: r.peer, answer: JSON.parse(r.answer) as SessionDescription, localPort: r.localPort };
   }
 
@@ -71,30 +95,46 @@ export class Server extends EventEmitter<Events> {
     return this.native.budget(peer);
   }
 
-  /** Per-peer queue, pacer and SCTP state. `null` for an unknown peer. */
+  /** Per-peer queue, pacer and SCTP state. `null` for an unknown or closed peer. */
   stats(peer: number): PeerStats | null {
     return this.native.stats(peer);
   }
 
-  /** Close one peer. */
+  /** Close one peer gracefully (SCTP ABORT + DTLS close_notify). Emits `close`. */
   closePeer(peer: number): void {
     this.native.close(peer);
   }
 
-  /** Close every peer and stop emitting messages. */
+  /** Close every peer, stop the native thread. `close` events for open peers still arrive. */
   close(): void {
-    this.drain();
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    this.native.closeAll();
+    this.native.shutdown();
   }
 
-  private startDrain(): void {
-    if (this.timer) return;
-    this.timer = setInterval(() => this.drain(), this.drainIntervalMs);
+  private start(): void {
+    if (this.started) return;
+    this.started = true;
+    this.native.start((batch) => {
+      for (const e of batch) this.dispatch(e);
+    });
   }
 
-  private drain(): void {
-    for (const m of this.native.drain()) this.emit('message', m);
+  private dispatch(e: NativeEvent): void {
+    switch (e.kind) {
+      case 'message':
+        this.emit('message', { peer: e.peer, label: e.label!, data: e.data! });
+        break;
+      case 'open':
+        this.emit('open', { peer: e.peer });
+        break;
+      case 'channelopen':
+        this.emit('channelopen', { peer: e.peer, label: e.label! });
+        break;
+      case 'close':
+        this.emit('close', { peer: e.peer, reason: e.reason ?? 'closed' });
+        break;
+      case 'error':
+        if (this.listenerCount('error') > 0) this.emit('error', new PeerError(e.peer, e.reason ?? 'error'));
+        break;
+    }
   }
 }

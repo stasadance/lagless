@@ -1,9 +1,12 @@
 // End-to-end over loopback: node-datachannel (libdatachannel) client <-> lagless server.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert';
 import ndc from 'node-datachannel';
 import { Server } from '../dist/index.js';
 import type { Message } from '../dist/index.js';
+import dgram from 'node:dgram';
+
+after(() => ndc.cleanup());
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -23,29 +26,36 @@ test('client connects, both channels carry data both ways', { timeout: 30000 }, 
   } finally {
     pc.close();
     server.close();
-    ndc.cleanup();
   }
 });
 
-async function exchange(server: Server, pc: ndc.PeerConnection): Promise<void> {
-  const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
-  const r = pc.createDataChannel('r');
-  const got: Record<'u' | 'r', Buffer[]> = { u: [], r: [] };
-  u.onMessage((m) => got.u.push(Buffer.from(m as Buffer)));
-  r.onMessage((m) => got.r.push(Buffer.from(m as Buffer)));
+async function offerOf(pc: ndc.PeerConnection): Promise<string> {
   let gathered = false;
   pc.onGatheringStateChange((s) => { if (s === 'complete') gathered = true; });
   pc.setLocalDescription();
   await waitFor('gathering', () => gathered || pc.gatheringState() === 'complete');
   const offer = pc.localDescription();
   assert.ok(offer);
+  return offer.sdp;
+}
+
+async function exchange(server: Server, pc: ndc.PeerConnection, ip = '127.0.0.1'): Promise<number> {
+  const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
+  const r = pc.createDataChannel('r');
+  const got: Record<'u' | 'r', Buffer[]> = { u: [], r: [] };
+  u.onMessage((m) => got.u.push(Buffer.from(m as Buffer)));
+  r.onMessage((m) => got.r.push(Buffer.from(m as Buffer)));
+  const sdp = await offerOf(pc);
 
   const inbox: Message[] = [];
-  server.on('message', (m) => inbox.push(m));
-
-  const acc = server.accept({ type: 'offer', sdp: offer.sdp }, '127.0.0.1');
+  const opened = new Set<string>();
+  let open = false;
+  const acc = await server.accept({ type: 'offer', sdp }, ip);
+  server.on('message', (m) => { if (m.peer === acc.peer) inbox.push(m); });
+  server.on('open', (e) => { if (e.peer === acc.peer) open = true; });
+  server.on('channelopen', (e) => { if (e.peer === acc.peer) opened.add(e.label); });
   assert.ok(acc.peer > 0);
-  assert.ok(acc.localPort > 0);
+  assert.strictEqual(acc.localPort, server.localPort);
   assert.strictEqual(acc.answer.type, 'answer');
   pc.setRemoteDescription(acc.answer.sdp, 'answer');
 
@@ -54,6 +64,7 @@ async function exchange(server: Server, pc: ndc.PeerConnection): Promise<void> {
   r.onOpen(() => { rOpen = true; });
   await waitFor('channels open', () => (uOpen || u.isOpen()) && (rOpen || r.isOpen()));
   await waitFor('server connected', () => server.stats(acc.peer)?.connected === true);
+  await waitFor('open event', () => open);
 
   // client -> server
   u.sendMessageBinary(Buffer.from('ping-u'));
@@ -63,9 +74,8 @@ async function exchange(server: Server, pc: ndc.PeerConnection): Promise<void> {
   assert.deepStrictEqual(labels, ['r:ping-r', 'u:ping-u']);
 
   // server -> client (channels open on the server once DCEP completes)
-  await waitFor('server channel open', () => {
-    try { return server.send(acc.peer, 'u', Buffer.from('pong-u'), { exempt: true }); } catch { return false; }
-  });
+  await waitFor('channelopen events', () => opened.has('u') && opened.has('r'));
+  assert.strictEqual(server.send(acc.peer, 'u', Buffer.from('pong-u'), { exempt: true }), true);
   assert.strictEqual(server.send(acc.peer, 'r', new TextEncoder().encode('pong-r')), true);
   await waitFor('client inbox', () => got.u.length >= 1 && got.r.length >= 1);
   assert.strictEqual(got.u[0].toString(), 'pong-u');
@@ -76,7 +86,56 @@ async function exchange(server: Server, pc: ndc.PeerConnection): Promise<void> {
   assert.strictEqual(st.closed, false);
   assert.ok(st.rate > 0, 'pacer rate');
   assert.strictEqual(typeof server.budget(acc.peer), 'number');
+  return acc.peer;
 }
+
+test('many peers share one port; closePeer and remote close emit close and drop the peer', { timeout: 60000 }, async () => {
+  const server = new Server();
+  const pcs = [0, 1, 2].map((i) => new ndc.PeerConnection(`c${i}`, { iceServers: [] }));
+  const closes = new Map<number, string>();
+  server.on('close', (e) => closes.set(e.peer, e.reason));
+  try {
+    const peers = await Promise.all(pcs.map((pc) => exchange(server, pc)));
+    assert.strictEqual(new Set(peers).size, 3);
+
+    // local close: client sees the channel go away quickly (ABORT / close_notify, no timeout)
+    let clientClosed = false;
+    pcs[0].onStateChange((s) => { if (s === 'closed' || s === 'failed' || s === 'disconnected') clientClosed = true; });
+    server.closePeer(peers[0]);
+    await waitFor('local close event', () => closes.get(peers[0]) === 'local');
+    assert.strictEqual(server.stats(peers[0]), null);
+    assert.throws(() => server.send(peers[0], 'r', Buffer.from('x')), /no such peer/);
+    await waitFor('client notices close', () => clientClosed, 5000);
+
+    // remote close: the peer is removed without the app polling
+    pcs[1].close();
+    await waitFor('remote close event', () => closes.has(peers[1]), 15000);
+    assert.strictEqual(server.stats(peers[1]), null);
+
+    // the third peer is untouched
+    assert.strictEqual(server.stats(peers[2])?.connected, true);
+  } finally {
+    for (const pc of pcs) pc.close();
+    server.close();
+  }
+});
+
+test('IPv6 advertise address over a dual-stack socket', { timeout: 30000 }, async (t) => {
+  const ok = await new Promise<boolean>((res) => {
+    const s = dgram.createSocket('udp6');
+    s.once('error', () => { s.close(); res(false); });
+    s.bind(0, '::1', () => { s.close(); res(true); });
+  });
+  if (!ok) { t.skip('no IPv6 loopback'); return; }
+  const server = new Server({ bindAddress: '::' });
+  const pc = new ndc.PeerConnection('v6', { iceServers: [] });
+  try {
+    await exchange(server, pc, '::1');
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
 
 test('unknown channel and unknown peer are errors', () => {
   const server = new Server({ pacer: false, rack: false, unreliableLimit: 0 });
