@@ -1,6 +1,8 @@
 <p align="center">
-  <img alt="lagless" src="docs/assets/logo-light.svg#gh-light-mode-only" width="320">
-  <img alt="lagless" src="docs/assets/logo-dark.svg#gh-dark-mode-only" width="320">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stasadance/lagless/main/docs/assets/logo-dark.svg">
+    <img alt="lagless" src="https://raw.githubusercontent.com/stasadance/lagless/main/docs/assets/logo-light.svg" width="320">
+  </picture>
 </p>
 
 <p align="center">Low-latency WebRTC data channels for io games. Rust core, Node.js API.</p>
@@ -17,8 +19,10 @@
 </p>
 
 <p align="center">
-  <img alt="At 5% packet loss, classic SCTP ping is 12.6 s and lagless ping is 214 ms (server to client)" src="docs/assets/hero-light.png#gh-light-mode-only" width="720">
-  <img alt="At 5% packet loss, classic SCTP ping is 12.6 s and lagless ping is 214 ms (server to client)" src="docs/assets/hero-dark.png#gh-dark-mode-only" width="720">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/stasadance/lagless/main/docs/assets/hero-dark.png">
+    <img alt="At 5% packet loss, classic SCTP ping is 12.6 s and lagless ping is 214 ms (server to client)" src="https://raw.githubusercontent.com/stasadance/lagless/main/docs/assets/hero-light.png" width="720">
+  </picture>
 </p>
 
 Browsers talk WebRTC data channels, and on lossy links the server side is where lag spikes come from.
