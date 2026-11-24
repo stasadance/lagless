@@ -31,6 +31,48 @@ test('client connects, both channels carry data both ways', { timeout: 30000 }, 
   }
 });
 
+// Trickle: the offer goes out with no candidates at all. The ICE-lite server learns the
+// client's address from its connectivity checks, so the client's candidates never matter.
+test('offer with no candidates (trickle) connects', { timeout: 30000 }, async () => {
+  const server = new Server();
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    await exchange(server, pc, undefined, '127.0.0.1', true, (sdp) =>
+      sdp.split('\r\n').filter((l) => !l.startsWith('a=candidate') && l !== 'a=end-of-candidates').join('\r\n'));
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
+
+// publicAddress: STUN Binding from the shared port. A fake STUN server echoes the source
+// address back (and drops the first request to exercise the retransmit).
+test('publicAddress returns the mapped address of the shared port', { timeout: 15000 }, async () => {
+  const stun = dgram.createSocket('udp4');
+  let seen = 0;
+  stun.on('message', (m, from) => {
+    if (m.readUInt16BE(0) !== 0x0001 || ++seen === 1) return;
+    const res = Buffer.alloc(32);
+    res.writeUInt16BE(0x0101, 0); res.writeUInt16BE(12, 2);
+    m.copy(res, 4, 4, 20); // magic cookie + txid
+    res.writeUInt16BE(0x0020, 20); res.writeUInt16BE(8, 22); res.writeUInt16BE(1, 24);
+    res.writeUInt16BE(from.port ^ 0x2112, 26);
+    from.address.split('.').forEach((o, i) => res.writeUInt8(Number(o) ^ m[4 + i], 28 + i));
+    stun.send(res, from.port, from.address);
+  });
+  await new Promise<void>((r) => stun.bind(0, '127.0.0.1', r));
+  const server = new Server();
+  try {
+    const a = await server.publicAddress(`127.0.0.1:${stun.address().port}`, 3000);
+    assert.deepStrictEqual(a, { ip: '127.0.0.1', port: server.localPort });
+    assert.strictEqual(seen, 2);
+    await assert.rejects(server.publicAddress('127.0.0.1:9', 300), /no response/);
+  } finally {
+    server.close();
+    stun.close();
+  }
+});
+
 // Relay-only client (TURN on the client side) against the ICE-lite server: the
 // server needs no TURN of its own, the TURN server relays UDP to its host candidate.
 const hasCoturn = spawnSync('turnserver', ['--version']).error === undefined;
@@ -70,13 +112,13 @@ async function offerOf(pc: ndc.PeerConnection): Promise<string> {
   return offer.sdp;
 }
 
-async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sdp: string) => void, ip = '127.0.0.1', pacer = true): Promise<number> {
+async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sdp: string) => void, ip = '127.0.0.1', pacer = true, editOffer = (sdp: string) => sdp): Promise<number> {
   const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
   const r = pc.createDataChannel('r');
   const got: Record<'u' | 'r', Buffer[]> = { u: [], r: [] };
   u.onMessage((m) => got.u.push(Buffer.from(m as Buffer)));
   r.onMessage((m) => got.r.push(Buffer.from(m as Buffer)));
-  const sdp = await offerOf(pc);
+  const sdp = editOffer(await offerOf(pc));
   checkOffer?.(sdp);
 
   const inbox: Message[] = [];

@@ -54,7 +54,7 @@ import { Server } from 'lagless';
 
 const server = new Server({ port: 7000 }); // one UDP port for every peer; defaults: unreliableLimit 65536, rack true, pacer true
 
-// signaling is yours: get the browser's offer (gather complete, non-trickle) over HTTP/WebSocket
+// signaling is yours: get the browser's offer over HTTP/WebSocket (no need to wait for ICE gathering)
 const { peer, answer } = await server.accept(offer, PUBLIC_IP); // or [PUBLIC_IPV4, PUBLIC_IPV6]
 // -> send `answer` ({ type, sdp }) back to the browser
 
@@ -77,6 +77,10 @@ Browser side: `pc.createDataChannel('state', { ordered: false, maxRetransmits: 0
 ### NAT, firewalls and TURN
 
 The server is ICE-lite with one public host candidate and needs no STUN or TURN of its own.
+Behind a NAT (cloud VMs with an elastic/public IP, home servers with a forwarded port),
+`await server.publicAddress('stun.example.com:3478')` asks a STUN server from the shared port and
+returns `{ ip, port }` to pass to `accept(offer, ip, port)`. The NAT must keep that mapping open
+and let inbound UDP through (1:1 NAT or a port forward), same as any UDP game server.
 Players behind symmetric NAT or networks that block UDP put a TURN server in the **browser's**
 config; the TURN server relays to the server's host candidate over UDP:
 
@@ -98,7 +102,8 @@ client against coturn.
 |---|---|
 | `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off; unreliable is also dropped while SCTP has > 2400 B unsent), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any), `pacerStartRate` (B/s, 65536), `pacerMinRate` (B/s, 8192), `pacerBurstMs` (100), `egressRate` (B/s, server-wide cap, off) |
 | `localPort` | the UDP port all peers share |
-| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON; `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
+| `publicAddress(stunServer, timeoutMs = 3000)` | async. STUN Binding from the shared port → `Promise<{ ip, port }>` (the NAT's mapping), for `accept()`. `stunServer` is `host[:port]`, port 3478 by default |
+| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON, complete or sent before gathering finished (trickle; later client candidates aren't needed); `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
 | `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate, budget or egress cap), or reliable hit `reliableLimit` (peer closed, reason `reliable-overflow`). Throws if the peer is gone, the channel isn't open or `data` exceeds the max message size |
 | `on('message', ({ peer, label, data, isString }) => …)` | every inbound message (`isString`: the sender sent a string), all peers (pushed from the native thread, no polling) |
 | `on('open' \| 'channelopen' \| 'close' \| 'error' \| 'overload', …)` | `{ peer }` connected; `{ peer, label }` channel open; `{ peer, reason }` peer gone and removed; `PeerError` (`.peer`), only emitted when an `error` listener exists; `{ peer, overloaded }` reliable overload started/ended |
@@ -146,11 +151,6 @@ silently raised to 256 KiB by libdatachannel, so the bench also sets `maxMessage
 [`bench/`](bench/)). Bandwidth caps with bufferbloat, 8 peers on one link, bursty loss, jitter,
 RTT swings and 400 ms RTT are in [`bench/results/04-scenarios.md`](bench/results/04-scenarios.md).
 The pacer runs the link slightly under capacity to keep the queue near zero.
-
-## Limits (v1)
-
-- Host candidate only (no STUN/TURN gathering on the server; clients use their own TURN, see above); non-trickle offers.
-- Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
 
 ## Build
 

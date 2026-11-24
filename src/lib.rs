@@ -337,6 +337,20 @@ impl Server {
         self.local_addr.port() as u32
     }
 
+    /// Learn this server's public address with a STUN Binding request sent from the shared
+    /// UDP port, so a NAT mapping for that port is what comes back. `stunServer` is
+    /// `host[:port]` (port 3478 by default; a `stun:` prefix is fine). Retransmits until
+    /// `timeoutMs`, then rejects. Resolves with `{ ip, port }`.
+    #[napi(ts_return_type = "Promise<MappedAddress>")]
+    pub fn public_address(&self, stun_server: String, timeout_ms: u32) -> AsyncTask<StunTask> {
+        AsyncTask::new(StunTask {
+            server: stun_server,
+            timeout: std::time::Duration::from_millis(timeout_ms.max(1) as u64),
+            v4_only: self.local_addr.is_ipv4(),
+            ctl: self.ctl.clone(),
+        })
+    }
+
     /// Set the callback that receives event batches (`Event[]`). Holds the process
     /// open until `shutdown()`. Only the first call counts.
     #[napi]
@@ -349,7 +363,8 @@ impl Server {
         Ok(())
     }
 
-    /// Accept a full (non-trickle) offer JSON (`{type, sdp}`). The answer carries one
+    /// Accept an offer JSON (`{type, sdp}`), complete or sent before gathering finished
+    /// (ICE-lite: the client's address comes from its checks). The answer carries one
     /// host candidate per advertise IP at `advertisePort` (0 = the server's port), so a
     /// NAT or test shaper can sit in front. Resolves with the peer id, answer JSON and port.
     /// Building the peer (certificate, DTLS/SCTP setup) runs off the JS thread.
@@ -634,5 +649,89 @@ impl AcceptTask {
             anyhow::bail!("server closed");
         }
         Ok(serde_json::to_string(&answer)?)
+    }
+}
+
+#[napi(object)]
+pub struct MappedAddress {
+    pub ip: String,
+    pub port: u32,
+}
+
+pub struct StunTask {
+    server: String,
+    timeout: std::time::Duration,
+    v4_only: bool,
+    ctl: Ctl,
+}
+
+impl StunTask {
+    fn target(&self) -> anyhow::Result<SocketAddr> {
+        use std::net::ToSocketAddrs;
+        let host = self.server.trim();
+        let host = host.strip_prefix("stun:").unwrap_or(host);
+        let addrs: Vec<SocketAddr> = match host.to_socket_addrs() {
+            Ok(a) => a.collect(),
+            // no port given
+            Err(_) => (host.trim_start_matches('[').trim_end_matches(']'), 3478)
+                .to_socket_addrs()?
+                .collect(),
+        };
+        addrs
+            .iter()
+            .find(|a| a.is_ipv4())
+            .or_else(|| addrs.iter().find(|_| !self.v4_only))
+            .copied()
+            .ok_or_else(|| anyhow::anyhow!("STUN server {host}: no usable address"))
+    }
+
+    fn run(&self) -> anyhow::Result<SocketAddr> {
+        use std::hash::{BuildHasher, Hasher};
+        let to = self.target()?;
+        let mut txid = [0u8; 12];
+        for c in txid.chunks_mut(8) {
+            let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+            // RandomState keys are random per process and bumped per call
+            h.write_u8(0);
+            c.copy_from_slice(&h.finish().to_le_bytes()[..c.len()]);
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let deadline = Instant::now() + self.timeout;
+        // RFC 8489 6.2.1-style retransmits: 250 ms, doubling
+        let mut wait = std::time::Duration::from_millis(250);
+        loop {
+            let cmd = Cmd::Stun {
+                to,
+                txid,
+                reply: tx.clone(),
+            };
+            if !self.ctl.push(cmd) {
+                anyhow::bail!("server closed");
+            }
+            let left = deadline.saturating_duration_since(Instant::now());
+            match rx.recv_timeout(wait.min(left)) {
+                Ok(a) => return Ok(a),
+                Err(_) if Instant::now() >= deadline => {
+                    anyhow::bail!("STUN {to}: no response in {} ms", self.timeout.as_millis())
+                }
+                Err(_) => wait *= 2,
+            }
+        }
+    }
+}
+
+impl Task for StunTask {
+    type Output = SocketAddr;
+    type JsValue = MappedAddress;
+
+    fn compute(&mut self) -> Result<SocketAddr> {
+        self.run().map_err(|e| Error::from_reason(e.to_string()))
+    }
+
+    fn resolve(&mut self, _env: Env, a: SocketAddr) -> Result<MappedAddress> {
+        Ok(MappedAddress {
+            ip: a.ip().to_string(),
+            port: a.port() as u32,
+        })
     }
 }
