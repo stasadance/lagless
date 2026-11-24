@@ -30,6 +30,15 @@ each tick; the lagless row sends reliable first. At 2% loss lagless is 210 / 335
 The pacer runs the link slightly under capacity (about 5–10% less goodput than RACK alone) to keep
 the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
+## Install
+
+```sh
+pnpm add lagless
+```
+
+Prebuilt binaries for Linux x64 and arm64 (glibc), macOS x64 and arm64, and Windows x64 ship inside
+the package, so there's no compile step and no per-platform packages. Node >= 18.
+
 ## Usage
 
 ```ts
@@ -75,7 +84,7 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 - One worker thread and one UDP socket per peer. No single-port mux yet.
 - Host candidate only (no STUN/TURN gathering on the server); non-trickle offers.
 - Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
-- Tested on Linux x64. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.
+- Builds for all five targets; end-to-end tests run on Linux x64 only. No musl (Alpine) build. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.
 
 ## Build
 
@@ -102,14 +111,10 @@ Its rtc-sctp tests (214) run there: `cargo test -p rtc-sctp`.
 
 ## Release
 
-Bump the version and push the tag. CI builds all five platforms and publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token). Each of the 6 packages (`lagless` + `lagless-<platform>`) needs a trusted publisher on npmjs.com pointing at `stasadance/lagless`, workflow `release.yml`.
-
-```sh
-pnpm version patch
-git push --follow-tags
-```
-
-The per-platform packages (`npm/`) are generated in the release job.
+Bump `version` in `package.json` and merge to `main`. The release workflow builds all five platforms,
+puts every binary in the one `lagless` package and publishes it to npm with
+[trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token, no tag). A push whose version
+is already on npm publishes nothing.
 
 ## License
 

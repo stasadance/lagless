@@ -1,7 +1,7 @@
 name: release
 on:
   push:
-    tags: ['v*']
+    branches: [main]
   pull_request:
 
 permissions:
@@ -50,7 +50,8 @@ jobs:
           if-no-files-found: error
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    # main only: publishes when package.json has a version npm doesn't have yet
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -63,19 +64,29 @@ jobs:
         with:
           node-version: 24 # trusted publishing needs node >= 22.14 and npm >= 11.5.1
           registry-url: https://registry.npmjs.org
-      - run: npm -v
-      - run: pnpm install --frozen-lockfile
-      - uses: actions/download-artifact@v4
+      - id: check
+        run: |
+          v=$(node -p "require('./package.json').version")
+          if npm view "lagless@$v" version >/dev/null 2>&1; then
+            echo "lagless@$v is already on npm, nothing to publish"
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+      - if: steps.check.outputs.publish
+        run: pnpm install --frozen-lockfile
+      # every platform's .node goes into the one package; binding.js loads the matching file
+      - if: steps.check.outputs.publish
+        uses: actions/download-artifact@v4
         with:
-          path: artifacts
           pattern: bindings-*
           merge-multiple: true
-      - uses: actions/download-artifact@v4
+      - if: steps.check.outputs.publish
+        uses: actions/download-artifact@v4
         with:
           name: loader
-      - run: pnpm build:ts
-      - run: pnpm napi create-npm-dirs
-      - run: pnpm napi artifacts --output-dir artifacts
-      # publishes npm/* platform packages and adds them as optionalDependencies
-      - run: pnpm napi pre-publish -t npm
-      - run: npm publish --access public
+      - if: steps.check.outputs.publish
+        run: pnpm build:ts
+      - if: steps.check.outputs.publish
+        run: ls -l *.node && test $(ls *.node | wc -l) -eq 5
+      - if: steps.check.outputs.publish
+        run: npm publish --access public
