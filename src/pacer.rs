@@ -87,6 +87,10 @@ pub struct Pacer {
     rtt_floor: Option<Duration>,
     /// srtt when the current drain began, and drain samples since
     drain_from: Option<(Duration, u32)>,
+    /// base RTT the last update used (min RTT, or the raised floor after a path change)
+    base_rtt: Option<Duration>,
+    /// srtt - lowest RTT seen, at the last update
+    net_queue: Duration,
 }
 
 impl Pacer {
@@ -103,6 +107,8 @@ impl Pacer {
             own_min_rtt: None,
             rtt_floor: None,
             drain_from: None,
+            base_rtt: None,
+            net_queue: Duration::ZERO,
         }
     }
 
@@ -112,6 +118,21 @@ impl Pacer {
 
     pub fn burst_cap(&self, mtu: u32) -> f64 {
         (self.rate * self.cfg.burst).max(4.0 * mtu.max(1200) as f64)
+    }
+
+    /// SCTP cwnd floor: the current rate over the base RTT plus the queue margin,
+    /// i.e. the window the pacer's rate needs without a standing queue. 0 (no floor,
+    /// plain SCTP loss response) before the first sample and while draining, so real
+    /// congestion still shrinks cwnd.
+    pub fn cwnd_floor(&self, mtu: u32) -> u32 {
+        // only for loss without a queue (random loss); a growing network queue
+        // means the loss is congestion and SCTP's normal cut applies
+        if self.draining || self.net_queue > NET_QUEUE_LIMIT / 2 {
+            return 0;
+        }
+        let Some(base) = self.base_rtt else { return 0 };
+        let mtu = mtu.max(1200) as f64;
+        (self.rate * (base + QUEUE_MARGIN).as_secs_f64()).max(4.0 * mtu) as u32
     }
 
     /// Tokens to add since the last call.
@@ -143,9 +164,15 @@ impl Pacer {
         }
         let base_rtt = s.min_rtt.or(self.own_min_rtt).unwrap_or(s.srtt);
         let min_rtt = self.rtt_floor.map_or(base_rtt, |f| f.max(base_rtt));
+        if min_rtt > Duration::ZERO {
+            self.base_rtt = Some(min_rtt);
+        }
         let mtu = s.mtu.max(1200) as f64;
         let target_for = |rate: f64| rate * (min_rtt + QUEUE_MARGIN).as_secs_f64() + 2.0 * mtu;
         let net_queue = s.srtt.saturating_sub(min_rtt);
+        // against the lowest RTT ever seen, not the raised base: any RTT growth
+        // counts here, so the cwnd floor stays off unless the path looks unloaded
+        self.net_queue = s.srtt.saturating_sub(base_rtt);
         // the link, not the app, set this sample if the budget bound or a queue built
         let queued = (s.outstanding as f64) > target_for(self.max_delivery().max(sample));
         self.app_limited = !s.budget_limited && !s.cwnd_limited && !queued && net_queue <= NET_QUEUE_LIMIT;
@@ -355,5 +382,29 @@ mod tests {
         // without the path-change check this starves at the floor (~15 KB/s)
         assert!(g > 0.8 * cap, "goodput {g}");
         assert!(d < 0.6, "draining {d:.2} of samples");
+    }
+
+    #[test]
+    fn cwnd_floor_only_without_queue() {
+        let t0 = Instant::now();
+        let mut p = Pacer::new(t0, Config::default());
+        assert_eq!(p.cwnd_floor(1200), 0, "no floor before the first sample");
+        let sig = |acked: u64, srtt_ms: u64| Signals {
+            acked_total: acked,
+            outstanding: 2000,
+            srtt: Duration::from_millis(srtt_ms),
+            min_rtt: Some(Duration::from_millis(400)),
+            mtu: 1200,
+            budget_limited: true,
+            cwnd_limited: true,
+        };
+        p.update(t0 + Duration::from_millis(500), &sig(0, 400));
+        p.update(t0 + Duration::from_millis(1000), &sig(20_000, 400));
+        // 40 KB/s delivered, probing at 1.15x over 400 + 40 ms
+        let f = p.cwnd_floor(1200);
+        assert!((18_000..23_000).contains(&f), "floor {f}");
+        // RTT grew 100 ms over the minimum: loss may be congestion, no floor
+        p.update(t0 + Duration::from_millis(1500), &sig(40_000, 500));
+        assert_eq!(p.cwnd_floor(1200), 0);
     }
 }

@@ -504,6 +504,9 @@ impl Loop {
                     sh.rate.store(p.pacer.rate as u64, Ordering::Relaxed);
                     sh.draining.store(p.pacer.draining, Ordering::Relaxed);
                     sh.app_limited.store(p.pacer.app_limited, Ordering::Relaxed);
+                    // The pacer sets the send rate; keep SCTP's window from collapsing
+                    // below what that rate needs over one RTT when random loss halves it.
+                    p.pc.set_sctp_cwnd_floor(p.pacer.cwnd_floor(sig.mtu));
                 }
             }
         }
