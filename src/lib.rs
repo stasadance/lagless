@@ -1,46 +1,36 @@
 //! lagless: low-latency WebRTC data channel server for Node.js.
 //!
 //! Built on the sans-IO webrtc-rs `rtc` stack (our fork, with RACK-TLP and
-//! transport-stats patches). Per peer: one worker thread and one UDP socket.
+//! transport-stats patches). One event-loop thread and one UDP port for all
+//! peers (see event_loop.rs).
 //! Unreliable sends are gated on the true SCTP queue and on a per-peer pacer
 //! budget, so stale game state is dropped instead of queued.
 
+mod event_loop;
 mod gate;
 mod pacer;
+mod stun;
 
-use bytes::BytesMut;
+use event_loop::{Cmd, Ctl, NewPeer};
+use napi::Either;
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
+use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
-use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
-use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::sdp::RTCSessionDescription;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
-use rtc::peer_connection::{RTCPeerConnection, RTCPeerConnectionBuilder};
-use rtc::sansio::Protocol;
-use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::HashMap;
-use std::net::{SocketAddr, UdpSocket};
+use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-struct Inbound {
-    peer: u32,
-    label: String,
-    data: Vec<u8>,
-    is_string: bool,
-}
-
-enum Cmd {
-    Send { label: String, data: Vec<u8>, is_string: bool },
-    Close,
-}
+/// live peers, shared by the JS thread (send/stats) and the loop (removes dead ones)
+pub(crate) type Registry = Arc<Mutex<HashMap<u32, Arc<PeerShared>>>>;
 
 #[derive(Default)]
-struct PeerShared {
+pub(crate) struct PeerShared {
     /// bytes SCTP has not released yet (sum of outstanding_bytes over channels)
     stack_outstanding: AtomicUsize,
     /// bytes accepted by send() but not yet handed to the worker loop
@@ -68,17 +58,10 @@ struct PeerShared {
     // send outcomes (see gate.rs)
     reliable_overflows: AtomicU64,
     send_errors: AtomicU64,
-    last_send_error: Mutex<Option<String>>,
     overloaded: AtomicBool,
     overloads: AtomicU64,
     /// negotiated SCTP max message size, 0 until known
     max_message_size: AtomicUsize,
-    close_reason: Mutex<Option<String>>,
-}
-
-struct Peer {
-    shared: Arc<PeerShared>,
-    tx: Sender<Cmd>,
 }
 
 #[napi(object)]
@@ -94,23 +77,26 @@ pub struct ServerOptions {
     /// (all channels, not yet released by SCTP) past this, the peer is closed with
     /// reason "reliable-overflow" and send() returns false. 0 = unbounded. Default 4 MiB.
     pub reliable_limit: Option<u32>,
-    /// Reliable-overload signal: `stats().overloaded` turns true once the pacer budget
-    /// has stayed below zero for this many ms (reliable load alone fills the link and
-    /// unreliable gets nothing). 0 disables. Default 1000.
+    /// Reliable-overload signal: an `overload` event (and `stats().overloaded`) once the
+    /// pacer budget has stayed below zero for this many ms (reliable load alone fills the
+    /// link and unreliable gets nothing). 0 disables. Default 1000.
     pub overload_ms: Option<u32>,
+    /// SCTP send weight per channel label, in data channel priority units
+    /// (128 very-low, 256 low = default, 512 medium, 1024 high). Setting any switches the
+    /// association to weighted fair queueing: each channel gets a share of the bytes SCTP
+    /// sends in proportion to its weight, so a 1024 pong channel jumps a 256 state queue.
+    pub channel_priority: Option<HashMap<String, u32>>,
     /// RACK-TLP loss detection on the SCTP association. Default true.
     pub rack: Option<bool>,
     /// SCTP RTO lower bound in ms. Default 1000 (RFC 9260).
     pub rto_min: Option<u32>,
     /// Per-peer send pacer: unreliable sends need budget tokens. Default true.
     pub pacer: Option<bool>,
-    /// SCTP send weight per channel label, in data channel priority units
-    /// (128 very-low, 256 low = default, 512 medium, 1024 high). Setting any switches the
-    /// association to weighted fair queueing: each channel gets a share of the bytes SCTP
-    /// sends in proportion to its weight, so a 1024 pong channel jumps a 256 state queue.
-    pub channel_priority: Option<HashMap<String, u32>>,
-    /// Local address peer sockets bind to. Default "0.0.0.0".
+    /// Local address the server's UDP socket binds to. Default "0.0.0.0".
+    /// "::" binds dual-stack (IPv4 + IPv6) where the OS allows it.
     pub bind_address: Option<String>,
+    /// UDP port every peer shares. Default 0 (any free port, see `localPort`).
+    pub port: Option<u32>,
 }
 
 const DEFAULT_UNRELIABLE_LIMIT: u32 = 64 * 1024;
@@ -124,13 +110,62 @@ pub struct Accepted {
     pub local_port: u32,
 }
 
+/// One item of a batch pushed to JS. `kind` is message | open | channelopen | close | error | overload.
 #[napi(object)]
-pub struct Message {
+pub struct Event {
+    pub kind: String,
     pub peer: u32,
-    pub label: String,
-    pub data: Buffer,
-    /// sent as a string (PPID 51/56) rather than binary
-    pub is_string: bool,
+    pub label: Option<String>,
+    pub data: Option<Buffer>,
+    /// close: local | closed | failed | reliable-overflow. error: what failed.
+    /// overload: start | end.
+    pub reason: Option<String>,
+    /// message: sent as a string (PPID 51/56) rather than binary
+    pub is_string: Option<bool>,
+}
+
+impl Event {
+    pub(crate) fn simple(kind: &str, peer: u32) -> Self {
+        Event {
+            kind: kind.into(),
+            peer,
+            label: None,
+            data: None,
+            reason: None,
+            is_string: None,
+        }
+    }
+    pub(crate) fn channel(kind: &str, peer: u32, label: String) -> Self {
+        Event {
+            label: Some(label),
+            ..Self::simple(kind, peer)
+        }
+    }
+    pub(crate) fn message(peer: u32, label: String, data: Vec<u8>, is_string: bool) -> Self {
+        Event {
+            data: Some(data.into()),
+            is_string: Some(is_string),
+            ..Self::channel("message", peer, label)
+        }
+    }
+    pub(crate) fn close(peer: u32, reason: &str) -> Self {
+        Event {
+            reason: Some(reason.into()),
+            ..Self::simple("close", peer)
+        }
+    }
+    pub(crate) fn error(peer: u32, reason: String) -> Self {
+        Event {
+            reason: Some(reason),
+            ..Self::simple("error", peer)
+        }
+    }
+    pub(crate) fn overload(peer: u32, on: bool) -> Self {
+        Event {
+            reason: Some(if on { "start" } else { "end" }.into()),
+            ..Self::simple("overload", peer)
+        }
+    }
 }
 
 #[napi(object)]
@@ -153,36 +188,32 @@ pub struct PeerStats {
     pub rack_lost: f64,
     pub rack_probes: f64,
     pub t3_timeouts: f64,
-    /// reliable sends refused by the reliable byte cap (the peer is closed on the first)
-    pub reliable_overflows: f64,
-    /// messages rtc refused after send() returned true (channel closing, too big, ...)
+    /// messages rtc refused after send() returned true (each also emits `error`)
     pub send_errors: f64,
-    pub last_send_error: Option<String>,
     /// pacer budget has been negative for `overloadMs`: shed reliable load or kick
     pub overloaded: bool,
     /// times `overloaded` turned true
     pub overloads: f64,
-    /// why the peer was closed by lagless, e.g. "reliable-overflow"
-    pub close_reason: Option<String>,
 }
 
 #[napi]
 pub struct Server {
     limits: gate::Limits,
-    overload_ms: u32,
-    priorities: Arc<HashMap<String, u16>>,
+    wfq: bool,
     rack: bool,
     rto_min: Option<u32>,
-    bind_address: String,
-    next_id: u32,
-    peers: HashMap<u32, Peer>,
-    inbox: Arc<Mutex<Vec<Inbound>>>,
+    local_addr: SocketAddr,
+    next_id: std::sync::atomic::AtomicU32,
+    registry: Registry,
+    ctl: Ctl,
+    thread: Mutex<Option<std::thread::JoinHandle<()>>>,
 }
 
 #[napi]
 impl Server {
+    /// Binds the shared UDP socket and starts the event-loop thread (idle until peers exist).
     #[napi(constructor)]
-    pub fn new(opts: Option<ServerOptions>) -> Self {
+    pub fn new(opts: Option<ServerOptions>) -> Result<Self> {
         let _ = env_logger::try_init();
         let opts = opts.unwrap_or(ServerOptions {
             unreliable_limit: None,
@@ -193,74 +224,132 @@ impl Server {
             rto_min: None,
             pacer: None,
             bind_address: None,
+            port: None,
         });
-        Server {
+        let bind = opts.bind_address.as_deref().unwrap_or("0.0.0.0");
+        let ip: IpAddr = bind
+            .parse()
+            .map_err(|e| Error::from_reason(format!("bindAddress {bind}: {e}")))?;
+        let addr = SocketAddr::new(ip, opts.port.unwrap_or(0) as u16);
+        let sock =
+            bind_socket(addr).map_err(|e| Error::from_reason(format!("bind {addr}: {e}")))?;
+        let local_addr = sock
+            .local_addr()
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let pacer = opts.pacer.unwrap_or(true);
+        let registry: Registry = Arc::default();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let priorities: HashMap<String, u16> = opts
+            .channel_priority
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(l, p)| (l, p.clamp(1, u16::MAX as u32) as u16))
+            .collect();
+        let wfq = !priorities.is_empty();
+        let overload_ms = if pacer { opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS) } else { 0 };
+        let (lp, ctl) = event_loop::new(sock, registry.clone(), pacer, overload_ms, priorities, tx, rx)
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        let thread = std::thread::Builder::new()
+            .name("lagless".into())
+            .spawn(move || lp.run())
+            .map_err(|e| Error::from_reason(e.to_string()))?;
+        Ok(Server {
             limits: gate::Limits {
                 unreliable: opts.unreliable_limit.unwrap_or(DEFAULT_UNRELIABLE_LIMIT) as usize,
                 reliable: opts.reliable_limit.unwrap_or(DEFAULT_RELIABLE_LIMIT) as usize,
-                pacer: opts.pacer.unwrap_or(true),
+                pacer,
             },
-            overload_ms: opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS),
-            priorities: Arc::new(
-                opts.channel_priority
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|(l, p)| (l, p.clamp(1, u16::MAX as u32) as u16))
-                    .collect(),
-            ),
+            wfq,
             rack: opts.rack.unwrap_or(true),
             rto_min: opts.rto_min,
-            bind_address: opts.bind_address.unwrap_or_else(|| "0.0.0.0".to_string()),
-            next_id: 1,
-            peers: HashMap::new(),
-            inbox: Arc::new(Mutex::new(Vec::new())),
-        }
+            local_addr,
+            next_id: 1.into(),
+            registry,
+            ctl,
+            thread: Mutex::new(Some(thread)),
+        })
+    }
+
+    /// UDP port every peer shares.
+    #[napi(getter)]
+    pub fn local_port(&self) -> u32 {
+        self.local_addr.port() as u32
+    }
+
+    /// Set the callback that receives event batches (`Event[]`). Holds the process
+    /// open until `shutdown()`. Only the first call counts.
+    #[napi]
+    pub fn start(&self, cb: Function<Vec<Event>, ()>) -> Result<()> {
+        let tsfn = cb
+            .build_threadsafe_function::<Vec<Event>>()
+            .callee_handled::<false>()
+            .build()?;
+        self.ctl.push(Cmd::Start(tsfn));
+        Ok(())
     }
 
     /// Accept a full (non-trickle) offer JSON (`{type, sdp}`). The answer carries one
-    /// host candidate `advertiseIp:advertisePort` (port 0 = the bound port), so a NAT
-    /// or test shaper can sit in front. Returns the peer id, answer JSON and bound port.
-    #[napi]
-    pub fn accept_offer(&mut self, offer_json: String, advertise_ip: String, advertise_port: u32) -> Result<Accepted> {
-        let id = self.next_id;
-        self.next_id += 1;
-        let shared = Arc::new(PeerShared::default());
-        let (tx, rx) = channel::<Cmd>();
-        let (ans_tx, ans_rx) = channel::<std::result::Result<(String, u16), String>>();
-        let sh = shared.clone();
-        let inbox = self.inbox.clone();
-        let (rack, rto_min, pacer, overload_ms) = (self.rack, self.rto_min, self.limits.pacer, self.overload_ms);
-        let bind = self.bind_address.clone();
-        let priorities = self.priorities.clone();
-        std::thread::Builder::new()
-            .name(format!("peer-{id}"))
-            .spawn(move || {
-                if let Err(e) = worker(id, offer_json, bind, advertise_ip, advertise_port as u16, rack, rto_min, pacer, overload_ms, priorities, sh.clone(), inbox, rx, &ans_tx) {
-                    let _ = ans_tx.send(Err(e.to_string()));
-                }
-                sh.closed.store(true, Ordering::Relaxed);
-            })
-            .map_err(|e| Error::from_reason(e.to_string()))?;
-        let (answer, port) = ans_rx
-            .recv()
-            .map_err(|e| Error::from_reason(e.to_string()))?
-            .map_err(Error::from_reason)?;
-        self.peers.insert(id, Peer { shared, tx });
-        Ok(Accepted { peer: id, answer, local_port: port as u32 })
+    /// host candidate per advertise IP at `advertisePort` (0 = the server's port), so a
+    /// NAT or test shaper can sit in front. Resolves with the peer id, answer JSON and port.
+    /// Building the peer (certificate, DTLS/SCTP setup) runs off the JS thread.
+    #[napi(ts_return_type = "Promise<Accepted>")]
+    pub fn accept_offer(
+        &self,
+        offer_json: String,
+        advertise_ip: Either<String, Vec<String>>,
+        advertise_port: u32,
+    ) -> Result<AsyncTask<AcceptTask>> {
+        let ips = match advertise_ip {
+            Either::A(s) => vec![s],
+            Either::B(v) => v,
+        };
+        if ips.is_empty() {
+            return Err(Error::from_reason("need at least one advertise IP"));
+        }
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let port = if advertise_port == 0 {
+            self.local_addr.port()
+        } else {
+            advertise_port as u16
+        };
+        Ok(AsyncTask::new(AcceptTask {
+            id,
+            offer_json,
+            ips,
+            port,
+            rack: self.rack,
+            rto_min: self.rto_min,
+            wfq: self.wfq,
+            registry: self.registry.clone(),
+            ctl: self.ctl.clone(),
+        }))
     }
 
     /// Returns false when an unreliable send was dropped by the backpressure gate
     /// (caller keeps the state "owed"), or when a reliable send hit the reliable byte
-    /// cap (the peer is then closed, reason "reliable-overflow"). `exempt` bypasses the
-    /// gate and pacer (latency probes). `is_string` sends `data` (UTF-8) as a string.
+    /// cap (the peer is then closed: `close` event, reason "reliable-overflow").
+    /// `exempt` bypasses the gate and pacer (latency probes). `is_string` sends `data`
+    /// (UTF-8) as a string message.
     ///
     /// Each check-and-reserve is atomic, but the gate reads a snapshot of the SCTP queue
-    /// taken by the worker, so the limits are approximate by up to one worker loop.
+    /// taken by the loop thread, so limits are approximate by up to one loop pass.
     /// Call send() for a given Server from one JS thread (it is not shareable anyway).
     #[napi]
-    pub fn send(&self, peer: u32, label: String, data: Buffer, exempt: bool, is_string: Option<bool>) -> Result<bool> {
-        let p = self.peers.get(&peer).ok_or_else(|| Error::from_reason("no such peer"))?;
-        let s = &p.shared;
+    pub fn send(
+        &self,
+        peer: u32,
+        label: String,
+        data: Buffer,
+        exempt: bool,
+        is_string: Option<bool>,
+    ) -> Result<bool> {
+        let s = self
+            .registry
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .cloned()
+            .ok_or_else(|| Error::from_reason("no such peer"))?;
         if s.closed.load(Ordering::Acquire) {
             return Err(Error::from_reason("peer closed"));
         }
@@ -271,25 +360,31 @@ impl Server {
         let len = data.len();
         let max = s.max_message_size.load(Ordering::Relaxed);
         if max > 0 && len > max {
-            return Err(Error::from_reason(format!("message of {len} bytes exceeds max message size {max}")));
+            return Err(Error::from_reason(format!(
+                "message of {len} bytes exceeds max message size {max}"
+            )));
         }
         let is_string = is_string.unwrap_or(false);
         if is_string && std::str::from_utf8(&data).is_err() {
             return Err(Error::from_reason("string message is not valid UTF-8"));
         }
-        match gate::admit(s, self.limits, unreliable, exempt, len) {
+        match gate::admit(&s, self.limits, unreliable, exempt, len) {
             gate::Verdict::Queued => {}
             gate::Verdict::Dropped => return Ok(false),
             gate::Verdict::Overflow => {
-                s.close_reason.lock().unwrap().get_or_insert_with(|| "reliable-overflow".to_string());
                 s.closed.store(true, Ordering::Release);
-                let _ = p.tx.send(Cmd::Close);
+                self.ctl.push(Cmd::Kick(peer, "reliable-overflow"));
                 return Ok(false);
             }
         }
-        if p.tx.send(Cmd::Send { label, data: data.to_vec(), is_string }).is_err() {
+        if !self.ctl.push(Cmd::Send {
+            peer,
+            label,
+            data: data.to_vec(),
+            is_string,
+        }) {
             s.pending_cmd.fetch_sub(len, Ordering::AcqRel);
-            return Err(Error::from_reason("peer closed"));
+            return Err(Error::from_reason("server closed"));
         }
         Ok(true)
     }
@@ -297,288 +392,162 @@ impl Server {
     /// Bytes the pacer allows right now (can be negative after reliable sends).
     #[napi]
     pub fn budget(&self, peer: u32) -> f64 {
-        self.peers
+        self.registry
+            .lock()
+            .unwrap()
             .get(&peer)
-            .map_or(0.0, |p| p.shared.tokens.load(Ordering::Relaxed) as f64)
+            .map_or(0.0, |s| s.tokens.load(Ordering::Relaxed) as f64)
     }
 
-    /// Take every message received since the last call (all peers, one N-API call).
-    #[napi]
-    pub fn drain(&self) -> Vec<Message> {
-        let v = std::mem::take(&mut *self.inbox.lock().unwrap());
-        v.into_iter()
-            .map(|m| Message { peer: m.peer, label: m.label, data: Buffer::from(m.data), is_string: m.is_string })
-            .collect()
-    }
-
-    /// Per-peer queue, pacer and SCTP state. `null` for an unknown peer.
+    /// Per-peer queue, pacer and SCTP state. `null` for an unknown or closed peer.
     #[napi]
     pub fn stats(&self, peer: u32) -> Option<PeerStats> {
-        self.peers.get(&peer).map(|p| {
-            let s = &p.shared;
-            PeerStats {
-                connected: s.connected.load(Ordering::Relaxed),
-                closed: s.closed.load(Ordering::Relaxed),
-                stack_outstanding: s.stack_outstanding.load(Ordering::Relaxed) as u32,
-                pending_cmd: s.pending_cmd.load(Ordering::Relaxed) as u32,
-                dropped: s.dropped.load(Ordering::Relaxed) as f64,
-                sent_unreliable: s.sent_unreliable.load(Ordering::Relaxed) as f64,
-                paced_drops: s.paced_drops.load(Ordering::Relaxed) as f64,
-                budget: s.tokens.load(Ordering::Relaxed) as f64,
-                rate: s.rate.load(Ordering::Relaxed) as f64,
-                draining: s.draining.load(Ordering::Relaxed),
-                srtt_ms: s.srtt_ms.load(Ordering::Relaxed) as f64,
-                min_rtt_ms: s.min_rtt_ms.load(Ordering::Relaxed) as f64,
-                cwnd: s.cwnd.load(Ordering::Relaxed) as f64,
-                inflight: s.inflight.load(Ordering::Relaxed) as f64,
-                pending: s.pending.load(Ordering::Relaxed) as f64,
-                rack_lost: s.rack_lost.load(Ordering::Relaxed) as f64,
-                rack_probes: s.rack_probes.load(Ordering::Relaxed) as f64,
-                t3_timeouts: s.t3_timeouts.load(Ordering::Relaxed) as f64,
-                reliable_overflows: s.reliable_overflows.load(Ordering::Relaxed) as f64,
-                send_errors: s.send_errors.load(Ordering::Relaxed) as f64,
-                last_send_error: s.last_send_error.lock().unwrap().clone(),
-                overloaded: s.overloaded.load(Ordering::Relaxed),
-                overloads: s.overloads.load(Ordering::Relaxed) as f64,
-                close_reason: s.close_reason.lock().unwrap().clone(),
-            }
+        let s = self.registry.lock().unwrap().get(&peer).cloned()?;
+        Some(PeerStats {
+            connected: s.connected.load(Ordering::Relaxed),
+            closed: s.closed.load(Ordering::Relaxed),
+            stack_outstanding: s.stack_outstanding.load(Ordering::Relaxed) as u32,
+            pending_cmd: s.pending_cmd.load(Ordering::Relaxed) as u32,
+            dropped: s.dropped.load(Ordering::Relaxed) as f64,
+            sent_unreliable: s.sent_unreliable.load(Ordering::Relaxed) as f64,
+            paced_drops: s.paced_drops.load(Ordering::Relaxed) as f64,
+            budget: s.tokens.load(Ordering::Relaxed) as f64,
+            rate: s.rate.load(Ordering::Relaxed) as f64,
+            draining: s.draining.load(Ordering::Relaxed),
+            srtt_ms: s.srtt_ms.load(Ordering::Relaxed) as f64,
+            min_rtt_ms: s.min_rtt_ms.load(Ordering::Relaxed) as f64,
+            cwnd: s.cwnd.load(Ordering::Relaxed) as f64,
+            inflight: s.inflight.load(Ordering::Relaxed) as f64,
+            pending: s.pending.load(Ordering::Relaxed) as f64,
+            rack_lost: s.rack_lost.load(Ordering::Relaxed) as f64,
+            rack_probes: s.rack_probes.load(Ordering::Relaxed) as f64,
+            t3_timeouts: s.t3_timeouts.load(Ordering::Relaxed) as f64,
+            send_errors: s.send_errors.load(Ordering::Relaxed) as f64,
+            overloaded: s.overloaded.load(Ordering::Relaxed),
+            overloads: s.overloads.load(Ordering::Relaxed) as f64,
         })
     }
 
-    /// Close one peer and stop its worker.
+    /// Close one peer: SCTP ABORT + DTLS close_notify go out, then a `close` event.
     #[napi]
-    pub fn close(&mut self, peer: u32) {
-        if let Some(p) = self.peers.remove(&peer) {
-            let _ = p.tx.send(Cmd::Close);
-        }
+    pub fn close(&self, peer: u32) {
+        self.ctl.push(Cmd::Close(peer));
     }
 
-    /// Close every peer.
+    /// Close every peer (the server keeps running).
     #[napi]
-    pub fn close_all(&mut self) {
-        for (_, p) in self.peers.drain() {
-            let _ = p.tx.send(Cmd::Close);
+    pub fn close_all(&self) {
+        self.ctl.push(Cmd::CloseAll);
+    }
+
+    /// Close every peer, stop the loop thread and release the callback.
+    #[napi]
+    pub fn shutdown(&self) {
+        self.ctl.push(Cmd::Shutdown);
+        if let Some(t) = self.thread.lock().unwrap().take() {
+            let _ = t.join();
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn worker(
+/// Big socket buffers: one socket carries every peer.
+fn bind_socket(addr: SocketAddr) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let s = Socket::new(Domain::for_address(addr), Type::DGRAM, Some(Protocol::UDP))?;
+    if addr.is_ipv6() && addr.ip().is_unspecified() {
+        let _ = s.set_only_v6(false);
+    }
+    let _ = s.set_recv_buffer_size(4 << 20);
+    let _ = s.set_send_buffer_size(4 << 20);
+    s.bind(&addr.into())?;
+    Ok(s.into())
+}
+
+pub struct AcceptTask {
     id: u32,
     offer_json: String,
-    bind: String,
-    advertise_ip: String,
-    advertise_port: u16,
+    ips: Vec<String>,
+    port: u16,
     rack: bool,
     rto_min: Option<u32>,
-    pacer_on: bool,
-    overload_ms: u32,
-    priorities: Arc<HashMap<String, u16>>,
-    sh: Arc<PeerShared>,
-    inbox: Arc<Mutex<Vec<Inbound>>>,
-    rx: Receiver<Cmd>,
-    ans_tx: &Sender<std::result::Result<(String, u16), String>>,
-) -> anyhow::Result<()> {
-    let socket = UdpSocket::bind(format!("{bind}:0"))?;
-    let local_addr = socket.local_addr()?;
+    wfq: bool,
+    registry: Registry,
+    ctl: Ctl,
+}
 
-    let offer: RTCSessionDescription = serde_json::from_str(&offer_json)?;
-    let mut seb = SettingEngineBuilder::new()
-        .with_lite(true)
-        .with_sctp_rack(rack)
-        .with_sctp_weighted_fair_queueing(!priorities.is_empty());
-    if let Some(ms) = rto_min {
-        seb = seb.with_sctp_rto_min(ms as u64);
+impl Task for AcceptTask {
+    type Output = String;
+    type JsValue = Accepted;
+
+    fn compute(&mut self) -> Result<String> {
+        self.build().map_err(|e| Error::from_reason(e.to_string()))
     }
-    let setting_engine = seb.build();
-    let mut pc: RTCPeerConnection = RTCPeerConnectionBuilder::new()
-        .with_configuration(RTCConfigurationBuilder::new().build())
-        .with_setting_engine(setting_engine)
-        .build(Instant::now())?;
-    pc.set_remote_description(Instant::now(), offer)?;
-    // address the peer sees (a shaper/NAT may sit in front); ICE matches inbound by this
-    let adv_port = if advertise_port == 0 { local_addr.port() } else { advertise_port };
-    let adv_addr: SocketAddr = format!("{advertise_ip}:{adv_port}").parse()?;
-    let cand = CandidateHostConfig {
-        base_config: CandidateConfig {
-            network: "udp".to_owned(),
-            address: advertise_ip,
-            port: adv_port,
-            component: 1,
-            ..Default::default()
-        },
-        ..Default::default()
+
+    fn resolve(&mut self, _env: Env, answer: String) -> Result<Accepted> {
+        Ok(Accepted {
+            peer: self.id,
+            answer,
+            local_port: self.port as u32,
+        })
     }
-    .new_candidate_host()?;
-    pc.add_local_candidate(RTCIceCandidate::from(&cand).to_json()?)?;
-    let answer = pc.create_answer(None)?;
-    pc.set_local_description(Instant::now(), answer.clone())?;
-    let answer = pc.local_description().unwrap_or(answer);
-    ans_tx
-        .send(Ok((serde_json::to_string(&answer)?, local_addr.port())))
-        .ok();
+}
 
-    let mut buf = vec![0u8; 2048];
-    let mut labels: HashMap<_, String> = HashMap::new();
-    let mut ids: HashMap<String, _> = HashMap::new();
-    let mut deadline: Option<Instant> = None;
-    let mut pacer = pacer::Pacer::new(Instant::now());
-    if pacer_on {
-        sh.rate.store(pacer.rate as u64, Ordering::Relaxed);
-    }
-    let mut last_stats = Instant::now();
-    let mut overload = gate::Overload::new(if pacer_on { overload_ms } else { 0 });
-
-    loop {
-        // commands from JS
-        loop {
-            match rx.try_recv() {
-                Ok(Cmd::Send { label, data, is_string }) => {
-                    let len = data.len();
-                    let r = match ids.get(&label).copied().and_then(|cid| pc.data_channel(cid)) {
-                        Some(mut dc) if is_string => {
-                            // validated as UTF-8 in send()
-                            let text = String::from_utf8(data).unwrap_or_default();
-                            dc.send_text(Instant::now(), text).map_err(|e| e.to_string())
-                        }
-                        Some(mut dc) => dc.send(Instant::now(), BytesMut::from(&data[..])).map_err(|e| e.to_string()),
-                        None => Err("channel closed".to_string()),
-                    };
-                    gate::record_send(&sh, &label, r);
-                    sh.pending_cmd.fetch_sub(len, Ordering::AcqRel);
-                }
-                Ok(Cmd::Close) => return Ok(()),
-                Err(std::sync::mpsc::TryRecvError::Empty) => break,
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => return Ok(()),
+impl AcceptTask {
+    fn build(&mut self) -> anyhow::Result<String> {
+        let offer: RTCSessionDescription = serde_json::from_str(&self.offer_json)?;
+        let mut seb = SettingEngineBuilder::new()
+            .with_lite(true)
+            .with_sctp_rack(self.rack)
+            .with_sctp_weighted_fair_queueing(self.wfq);
+        if let Some(ms) = self.rto_min {
+            seb = seb.with_sctp_rto_min(ms as u64);
+        }
+        let mut pc = RTCPeerConnectionBuilder::new()
+            .with_configuration(RTCConfigurationBuilder::new().build())
+            .with_setting_engine(seb.build())
+            .build(Instant::now())?;
+        pc.set_remote_description(Instant::now(), offer)?;
+        // addresses the peer sees (a shaper/NAT may sit in front); ICE matches inbound by these
+        let mut local_addrs = Vec::new();
+        for ip in &self.ips {
+            let parsed: IpAddr = ip
+                .parse()
+                .map_err(|e| anyhow::anyhow!("advertise IP {ip}: {e}"))?;
+            local_addrs.push(SocketAddr::new(parsed, self.port));
+            let cand = CandidateHostConfig {
+                base_config: CandidateConfig {
+                    network: "udp".to_owned(),
+                    address: parsed.to_string(),
+                    port: self.port,
+                    component: 1,
+                    ..Default::default()
+                },
+                ..Default::default()
             }
+            .new_candidate_host()?;
+            pc.add_local_candidate(RTCIceCandidate::from(&cand).to_json()?)?;
         }
-
-        if let Some(d) = deadline {
-            if Instant::now() >= d {
-                let _ = pc.handle_timeout(Instant::now());
-            }
+        let answer = pc.create_answer(None)?;
+        pc.set_local_description(Instant::now(), answer.clone())?;
+        let answer = pc.local_description().unwrap_or(answer);
+        let ufrag = stun::sdp_ufrag(&answer.sdp)
+            .ok_or_else(|| anyhow::anyhow!("answer has no ice-ufrag"))?;
+        let shared = Arc::new(PeerShared::default());
+        self.registry
+            .lock()
+            .unwrap()
+            .insert(self.id, shared.clone());
+        let np = NewPeer {
+            id: self.id,
+            pc,
+            ufrag,
+            local_addrs,
+            shared,
+        };
+        if !self.ctl.push(Cmd::Add(Box::new(np))) {
+            self.registry.lock().unwrap().remove(&self.id);
+            anyhow::bail!("server closed");
         }
-
-        while let Some(msg) = pc.poll_write() {
-            let addr = msg.transport.peer_addr;
-            if let Err(e) = socket.send_to(&msg.message, addr) {
-                log::debug!("peer {id}: send_to {addr} failed: {e}");
-            }
-        }
-        while let Some(ev) = pc.poll_event() {
-            match ev {
-                RTCPeerConnectionEvent::OnConnectionStateChangeEvent(st) => {
-                    let s = st.to_string();
-                    if s == "connected" {
-                        sh.connected.store(true, Ordering::Relaxed);
-                    }
-                    if s == "failed" || s == "closed" {
-                        return Ok(());
-                    }
-                }
-                RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(cid)) => {
-                    if let Some(mut dc) = pc.data_channel(cid) {
-                        let label = dc.label().to_string();
-                        if let Some(&p) = priorities.get(&label) {
-                            if let Err(e) = dc.set_priority(p) {
-                                log::debug!("peer {id}: set_priority {label}: {e}");
-                            }
-                        }
-                        let unreliable = dc.max_retransmits().is_some() || dc.max_packet_life_time().is_some();
-                        labels.insert(cid, label.clone());
-                        ids.insert(label.clone(), cid);
-                        sh.channels.lock().unwrap().insert(label, unreliable);
-                        if let Some(max) = pc.sctp().and_then(|t| t.max_message_size()) {
-                            sh.max_message_size.store(max as usize, Ordering::Relaxed);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-        {
-            let mut got = Vec::new();
-            while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
-                if let RTCMessage::DataChannelMessage(cid, m) = message {
-                    if let Some(l) = labels.get(&cid) {
-                        got.push(Inbound { peer: id, label: l.clone(), data: m.data.to_vec(), is_string: m.is_string });
-                    }
-                }
-            }
-            if !got.is_empty() {
-                inbox.lock().unwrap().extend(got);
-            }
-        }
-        // true stack queue
-        let mut out = 0usize;
-        for cid in ids.values() {
-            if let Some(dc) = pc.data_channel(*cid) {
-                out += dc.outstanding_bytes();
-            }
-        }
-        sh.stack_outstanding.store(out, Ordering::Release);
-
-        // pacer + transport stats
-        let now = Instant::now();
-        if pacer_on {
-            gate::refill(&sh, &mut pacer, now);
-            overload.update(&sh, now);
-        }
-        if now.saturating_duration_since(last_stats) >= pacer::INTERVAL {
-            last_stats = now;
-            if let Some(ts) = pc.sctp_transport_stats() {
-                sh.srtt_ms.store(ts.srtt_ms, Ordering::Relaxed);
-                sh.min_rtt_ms.store(ts.min_rtt_ms.unwrap_or(0), Ordering::Relaxed);
-                sh.cwnd.store(ts.cwnd as u64, Ordering::Relaxed);
-                sh.inflight.store(ts.inflight_bytes as u64, Ordering::Relaxed);
-                sh.pending.store(ts.pending_bytes as u64, Ordering::Relaxed);
-                sh.rack_lost.store(ts.rack_lost, Ordering::Relaxed);
-                sh.rack_probes.store(ts.rack_probes, Ordering::Relaxed);
-                sh.t3_timeouts.store(ts.t3_timeouts, Ordering::Relaxed);
-                if pacer_on {
-                    let sig = pacer::Signals {
-                        acked_total: ts.acked_bytes_total,
-                        outstanding: out + sh.pending_cmd.load(Ordering::Relaxed),
-                        srtt: Duration::from_millis(ts.srtt_ms),
-                        min_rtt: ts.min_rtt_ms.map(Duration::from_millis),
-                        mtu: ts.mtu,
-                    };
-                    // force the interval check inside update to pass
-                    pacer.update(now, &sig);
-                    sh.rate.store(pacer.rate as u64, Ordering::Relaxed);
-                    sh.draining.store(pacer.draining, Ordering::Relaxed);
-                }
-            }
-        }
-
-        deadline = pc.poll_timeout();
-        let now = Instant::now();
-        let mut wait = Duration::from_millis(1);
-        if let Some(d) = deadline {
-            wait = wait.min(d.saturating_duration_since(now));
-        }
-        if wait.is_zero() {
-            wait = Duration::from_micros(50);
-        }
-        socket.set_read_timeout(Some(wait))?;
-        match socket.recv_from(&mut buf) {
-            Ok((n, peer_addr)) => {
-                let r = pc.handle_read(TaggedBytesMut {
-                    now: Instant::now(),
-                    transport: TransportContext {
-                        local_addr: adv_addr,
-                        peer_addr,
-                        ecn: None,
-                        transport_protocol: TransportProtocol::UDP,
-                    },
-                    message: BytesMut::from(&buf[..n]),
-                });
-                if let Err(e) = r {
-                    log::debug!("peer {id}: handle_read: {e}");
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(e.into()),
-        }
+        Ok(serde_json::to_string(&answer)?)
     }
 }

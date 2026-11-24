@@ -52,13 +52,15 @@ the package, so there's no compile step and no per-platform packages. Node >= 18
 ```ts
 import { Server } from 'lagless';
 
-const server = new Server(); // defaults: unreliableLimit 65536, rack true, pacer true, bindAddress '0.0.0.0'
+const server = new Server({ port: 7000 }); // one UDP port for every peer; defaults: unreliableLimit 65536, rack true, pacer true
 
 // signaling is yours: get the browser's offer (gather complete, non-trickle) over HTTP/WebSocket
-const { peer, answer } = server.accept(offer, PUBLIC_IP);
+const { peer, answer } = await server.accept(offer, PUBLIC_IP); // or [PUBLIC_IPV4, PUBLIC_IPV6]
 // -> send `answer` ({ type, sdp }) back to the browser
 
 server.on('message', ({ peer, label, data }) => handle(peer, label, data));
+server.on('channelopen', ({ peer, label }) => { /* can send on `label` now */ });
+server.on('close', ({ peer, reason }) => forget(peer)); // 'local' | 'closed' | 'failed'; peer is already removed
 
 function tick() {
   server.send(peer, 'reliable', events);            // reliable: always queued
@@ -94,13 +96,15 @@ client against coturn.
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
-| `accept(offer, advertiseIp, advertisePort = 0)` | `offer` is `{ type, sdp }` or its JSON. → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
-| `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate or budget), or reliable hit `reliableLimit` (peer closed, `closeReason: 'reliable-overflow'`). Throws if the peer is closed, the channel isn't open or `data` exceeds the max message size |
-| `on('message', ({ peer, label, data, isString }) => …)` | every inbound message, all peers. `isString`: the sender sent a string |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any) |
+| `localPort` | the UDP port all peers share |
+| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON; `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
+| `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate or budget), or reliable hit `reliableLimit` (peer closed, reason `reliable-overflow`). Throws if the peer is gone, the channel isn't open or `data` exceeds the max message size |
+| `on('message', ({ peer, label, data, isString }) => …)` | every inbound message (`isString`: the sender sent a string), all peers (pushed from the native thread, no polling) |
+| `on('open' \| 'channelopen' \| 'close' \| 'error' \| 'overload', …)` | `{ peer }` connected; `{ peer, label }` channel open; `{ peer, reason }` peer gone and removed; `PeerError` (`.peer`), only emitted when an `error` listener exists; `{ peer, overloaded }` reliable overload started/ended |
 | `budget(peer)` | bytes the pacer allows right now (negative after a reliable burst) |
-| `stats(peer)` | `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts, reliableOverflows, sendErrors, lastSendError, overloaded, overloads, closeReason` |
-| `closePeer(peer)`, `close()` | |
+| `stats(peer)` | `null` once the peer is gone. `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts, sendErrors, overloaded, overloads` |
+| `closePeer(peer)`, `close()` | graceful: SCTP ABORT + DTLS close_notify, so the browser notices at once. `close()` also stops the native thread |
 | `native` | the raw Rust binding |
 
 Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
@@ -109,17 +113,17 @@ Notes:
 
 - **Which channels are gated.** A channel opened with `maxRetransmits` or `maxPacketLifeTime` (any value,
   so `maxRetransmits: 3` too) counts as unreliable: gated and paced. Every other channel is reliable.
-- **Reliable overload.** Reliable sends always go and may push the budget negative. `stats().overloaded`
-  turns true when the budget stayed below zero for `overloadMs`: reliable load alone fills the link and
-  unreliable gets nothing. Shed reliable load or kick the peer.
+- **Reliable overload.** Reliable sends always go and may push the budget negative. An `overload` event
+  (and `stats().overloaded`) fires when the budget stayed below zero for `overloadMs`: reliable load alone
+  fills the link and unreliable gets nothing. Shed reliable load or kick the peer.
 - **Channel priority.** `channelPriority: { pong: 1024 }` switches SCTP to weighted fair queueing
   (RFC 8260): each channel gets a share of the sent bytes in proportion to its weight (128 very-low,
   256 low = default, 512 medium, 1024 high), so a pong jumps a reliable backlog inside SCTP, not just
   the gate. Without it SCTP sends first-come-first-served.
-- **Send failures.** A message rtc refuses after `send()` returned `true` (channel closing, ...) bumps
-  `stats().sendErrors` and sets `lastSendError`.
+- **Send failures.** A message rtc refuses after `send()` returned `true` emits `error` and bumps
+  `stats().sendErrors`.
 - **Threading.** `send()` admission is atomic (CAS on the reservation and the budget), but it compares
-  against the worker's last snapshot of the SCTP queue, so limits can be off by one loop's worth of sends.
+  against the loop's last snapshot of the SCTP queue, so limits can be off by one loop pass of sends.
   Call a Server from one JS thread.
 
 ## Results
@@ -140,7 +144,6 @@ the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
 ## Limits (v1)
 
-- One worker thread and one UDP socket per peer. No single-port mux yet.
 - Host candidate only (no STUN/TURN gathering on the server; clients use their own TURN, see above); non-trickle offers.
 - Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
 - Builds for all five targets; end-to-end tests run on Linux x64 only. No musl (Alpine) build. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.

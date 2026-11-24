@@ -8,9 +8,9 @@ TypeScript API (Server extends EventEmitter)
   send(peer, label, buf, { exempt }) -> bool (false = dropped, keep owed)
   budget(peer)                       -> bytes allowed right now
   stats(peer)                        -> true queue, cwnd, srtt, minRtt, counters
-  on("message")                      -> fed by one batched native drain per ms
+  on("message" / "open" / "channelopen" / "close") -> pushed in batches from the native thread
 napi-rs bridge
-Rust core, one worker thread + one UDP socket per peer
+Rust core, one event-loop thread (mio) + one UDP port shared by all peers
   webrtc-rs rtc (stasadance/rtc fork): ICE-lite, DTLS, SCTP + RACK-TLP, exposed sender state
   own UDP loop and clock (sans-IO)
   true-queue gate (64 KiB) + per-peer pacer

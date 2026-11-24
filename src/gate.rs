@@ -91,10 +91,7 @@ pub(crate) fn record_send<E: Display>(s: &PeerShared, label: &str, r: Result<(),
         Ok(()) => None,
         Err(e) => {
             s.send_errors.fetch_add(1, Relaxed);
-            let msg = format!("send on '{label}' failed: {e}");
-            *s.last_send_error.lock().unwrap() = Some(msg.clone());
-            log::debug!("{msg}");
-            Some(msg)
+            Some(format!("send on {label}: {e}"))
         }
     }
 }
