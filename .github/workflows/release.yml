@@ -1,10 +1,10 @@
 name: release
-# Builds the seven targets only when a push to main changes package.json and its version
-# isn't on npm yet (= a release). Re-run by hand with workflow_dispatch.
+# Run by hand (Actions > release > Run workflow) on main. Version is YY.M.N (UTC), N =
+# commits on main since the month started (semver: no leading zeros, so Jan = 27.1.N).
+# It's stamped into package.json at publish time only (no commit to main), then main's
+# commit is tagged v<version> with a GitHub release. Re-running is safe: a version
+# already on npm isn't published again; an existing release means no new commits.
 on:
-  push:
-    branches: [main]
-    paths: ["package.json"]
   workflow_dispatch:
 
 permissions:
@@ -18,14 +18,28 @@ jobs:
   check:
     runs-on: ubuntu-latest
     outputs:
+      version: ${{ steps.check.outputs.version }}
       publish: ${{ steps.check.outputs.publish }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # full history to count this month's commits
       - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          v=$(node -p "require('./package.json').version")
+          if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+            echo "::error::run this on main, not $GITHUB_REF"; exit 1
+          fi
+          n=$(git rev-list --count --since="$(date -u +%Y-%m-01T00:00:00Z)" HEAD)
+          v="$(date -u +%y.%-m).$n"
+          echo "version $v ($n commits on main this month)"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "::error::release v$v already exists, no new commits on main since"; exit 1
+          fi
           if npm view "lagless@$v" version >/dev/null 2>&1; then
-            echo "lagless@$v is already on npm, nothing to build or publish"
+            echo "lagless@$v is already on npm, skipping build+publish, only tagging"
           else
             echo "publish=true" >> "$GITHUB_OUTPUT"
           fi
@@ -85,7 +99,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [check, build]
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -108,4 +122,18 @@ jobs:
           name: loader
       - run: pnpm build:ts
       - run: ls -l *.node && test $(ls *.node | wc -l) -eq 7
+      - run: npm version "${{ needs.check.outputs.version }}" --no-git-tag-version
       - run: npm publish --access public
+
+  release:
+    needs: [check, publish]
+    # also runs when publish was skipped (version already on npm), not when it failed
+    if: ${{ !failure() && !cancelled() }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create tag + release
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          V: ${{ needs.check.outputs.version }}
+        run: gh release create "v$V" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "v$V" --generate-notes
