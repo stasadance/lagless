@@ -46,11 +46,13 @@ pub(crate) fn admit(s: &PeerShared, lim: Limits, unreliable: bool, exempt: bool,
     let out = s.stack_outstanding.load(Acquire);
     if unreliable && !exempt {
         if !reserve(s, len, |p| lim.unreliable == 0 || out + p + len <= lim.unreliable) {
+            s.budget_limited.store(true, Relaxed);
             s.dropped.fetch_add(1, Relaxed);
             return Verdict::Dropped;
         }
         if lim.pacer && s.tokens.fetch_update(AcqRel, Acquire, |t| (t >= len as i64).then(|| t - len as i64)).is_err() {
             s.pending_cmd.fetch_sub(len, AcqRel);
+            s.budget_limited.store(true, Relaxed);
             s.paced_drops.fetch_add(1, Relaxed);
             s.dropped.fetch_add(1, Relaxed);
             return Verdict::Dropped;
@@ -70,7 +72,9 @@ pub(crate) fn admit(s: &PeerShared, lim: Limits, unreliable: bool, exempt: bool,
     }
     if lim.pacer {
         // reliable and exempt sends always go, and may push the budget negative
-        s.tokens.fetch_sub(len as i64, AcqRel);
+        if s.tokens.fetch_sub(len as i64, AcqRel) < len as i64 {
+            s.budget_limited.store(true, Relaxed);
+        }
     }
     Verdict::Queued
 }
@@ -173,7 +177,7 @@ mod tests {
     fn refill_keeps_concurrent_spends() {
         let s = Arc::new(PeerShared::default());
         let t0 = Instant::now();
-        let mut p = Pacer::new(t0);
+        let mut p = Pacer::new(t0, crate::pacer::Config::default());
         let spender = {
             let s = s.clone();
             std::thread::spawn(move || {

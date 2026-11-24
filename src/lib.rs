@@ -45,7 +45,12 @@ pub(crate) struct PeerShared {
     tokens: AtomicI64,
     rate: AtomicU64,
     draining: AtomicBool,
+    app_limited: AtomicBool,
     paced_drops: AtomicU64,
+    egress_drops: AtomicU64,
+    /// a send hit the gate or the pacer budget since the last pacer update
+    /// (the link, not the app, limited sending)
+    budget_limited: AtomicBool,
     // SCTP transport state
     srtt_ms: AtomicU64,
     min_rtt_ms: AtomicU64,
@@ -97,6 +102,32 @@ pub struct ServerOptions {
     pub bind_address: Option<String>,
     /// UDP port every peer shares. Default 0 (any free port, see `localPort`).
     pub port: Option<u32>,
+    /// Pacer rate before the first delivery sample, bytes/s. Default 65536.
+    pub pacer_start_rate: Option<u32>,
+    /// Pacer rate floor, bytes/s. Default 8192.
+    pub pacer_min_rate: Option<u32>,
+    /// Token bucket depth in ms of rate (pacer and egress cap). Default 100.
+    pub pacer_burst_ms: Option<u32>,
+    /// Server-wide egress cap over all peers, bytes/s. Unreliable sends need
+    /// budget from it too; reliable and exempt sends always go and may push it negative.
+    /// Not fair across peers: whoever sends first in a tick gets it. 0 or unset = off.
+    pub egress_rate: Option<u32>,
+}
+
+/// Shared token bucket for the server-wide egress cap. Refilled lazily on send().
+struct Egress {
+    rate: f64,
+    burst: f64,
+    tokens: f64,
+    last: Instant,
+}
+
+impl Egress {
+    fn refill(&mut self, now: Instant) {
+        let dt = now.saturating_duration_since(self.last).as_secs_f64();
+        self.last = now;
+        self.tokens = (self.tokens + self.rate * dt).min(self.rate * self.burst);
+    }
 }
 
 const DEFAULT_UNRELIABLE_LIMIT: u32 = 64 * 1024;
@@ -177,9 +208,14 @@ pub struct PeerStats {
     pub dropped: f64,
     pub sent_unreliable: f64,
     pub paced_drops: f64,
+    /// unreliable sends dropped by the server-wide egress cap
+    pub egress_drops: f64,
     pub budget: f64,
+    /// pacer rate, bytes/s; updated about every max(100 ms, srtt)
     pub rate: f64,
     pub draining: bool,
+    /// the last pacer delivery sample was app-limited (app sent less than the link carries)
+    pub app_limited: bool,
     pub srtt_ms: f64,
     pub min_rtt_ms: f64,
     pub cwnd: f64,
@@ -199,6 +235,7 @@ pub struct PeerStats {
 #[napi]
 pub struct Server {
     limits: gate::Limits,
+    egress: Option<Mutex<Egress>>,
     wfq: bool,
     rack: bool,
     rto_min: Option<u32>,
@@ -225,6 +262,25 @@ impl Server {
             pacer: None,
             bind_address: None,
             port: None,
+            pacer_start_rate: None,
+            pacer_min_rate: None,
+            pacer_burst_ms: None,
+            egress_rate: None,
+        });
+        let d = pacer::Config::default();
+        let pacer_cfg = pacer::Config {
+            start_rate: opts.pacer_start_rate.map_or(d.start_rate, |v| v.max(1) as f64),
+            floor_rate: opts.pacer_min_rate.map_or(d.floor_rate, |v| v.max(1) as f64),
+            burst: opts.pacer_burst_ms.map_or(d.burst, |v| v.max(1) as f64 / 1000.0),
+        };
+        let egress = opts.egress_rate.filter(|r| *r > 0).map(|r| {
+            let rate = r as f64;
+            Mutex::new(Egress {
+                rate,
+                burst: pacer_cfg.burst,
+                tokens: rate * pacer_cfg.burst,
+                last: Instant::now(),
+            })
         });
         let bind = opts.bind_address.as_deref().unwrap_or("0.0.0.0");
         let ip: IpAddr = bind
@@ -247,7 +303,7 @@ impl Server {
             .collect();
         let wfq = !priorities.is_empty();
         let overload_ms = if pacer { opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS) } else { 0 };
-        let (lp, ctl) = event_loop::new(sock, registry.clone(), pacer, overload_ms, priorities, tx, rx)
+        let (lp, ctl) = event_loop::new(sock, registry.clone(), pacer, pacer_cfg, overload_ms, priorities, tx, rx)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let thread = std::thread::Builder::new()
             .name("lagless".into())
@@ -259,6 +315,7 @@ impl Server {
                 reliable: opts.reliable_limit.unwrap_or(DEFAULT_RELIABLE_LIMIT) as usize,
                 pacer,
             },
+            egress,
             wfq,
             rack: opts.rack.unwrap_or(true),
             rto_min: opts.rto_min,
@@ -317,6 +374,7 @@ impl Server {
             offer_json,
             ips,
             port,
+            bound_port: self.local_addr.port(),
             rack: self.rack,
             rto_min: self.rto_min,
             wfq: self.wfq,
@@ -368,8 +426,23 @@ impl Server {
         if is_string && std::str::from_utf8(&data).is_err() {
             return Err(Error::from_reason("string message is not valid UTF-8"));
         }
+        // server-wide egress cap: held across admit so check + spend is one step
+        let mut egress = self.egress.as_ref().map(|e| e.lock().unwrap());
+        if let Some(eg) = egress.as_deref_mut() {
+            eg.refill(Instant::now());
+            if unreliable && !exempt && eg.tokens < len as f64 {
+                s.egress_drops.fetch_add(1, Ordering::Relaxed);
+                s.dropped.fetch_add(1, Ordering::Relaxed);
+                return Ok(false);
+            }
+        }
         match gate::admit(&s, self.limits, unreliable, exempt, len) {
-            gate::Verdict::Queued => {}
+            gate::Verdict::Queued => {
+                if let Some(eg) = egress.as_deref_mut() {
+                    eg.tokens -= len as f64;
+                }
+                drop(egress);
+            }
             gate::Verdict::Dropped => return Ok(false),
             gate::Verdict::Overflow => {
                 s.closed.store(true, Ordering::Release);
@@ -400,6 +473,10 @@ impl Server {
     }
 
     /// Per-peer queue, pacer and SCTP state. `null` for an unknown or closed peer.
+    /// SCTP fields (srtt, cwnd, inflight, ...) are snapshots taken every 50 ms;
+    /// `rate`, `draining` and `appLimited` change once per pacer sample
+    /// (every max(100 ms, srtt)). `budget`, `stackOutstanding` and the drop
+    /// counters are live.
     #[napi]
     pub fn stats(&self, peer: u32) -> Option<PeerStats> {
         let s = self.registry.lock().unwrap().get(&peer).cloned()?;
@@ -411,9 +488,11 @@ impl Server {
             dropped: s.dropped.load(Ordering::Relaxed) as f64,
             sent_unreliable: s.sent_unreliable.load(Ordering::Relaxed) as f64,
             paced_drops: s.paced_drops.load(Ordering::Relaxed) as f64,
+            egress_drops: s.egress_drops.load(Ordering::Relaxed) as f64,
             budget: s.tokens.load(Ordering::Relaxed) as f64,
             rate: s.rate.load(Ordering::Relaxed) as f64,
             draining: s.draining.load(Ordering::Relaxed),
+            app_limited: s.app_limited.load(Ordering::Relaxed),
             srtt_ms: s.srtt_ms.load(Ordering::Relaxed) as f64,
             min_rtt_ms: s.min_rtt_ms.load(Ordering::Relaxed) as f64,
             cwnd: s.cwnd.load(Ordering::Relaxed) as f64,
@@ -468,6 +547,8 @@ pub struct AcceptTask {
     offer_json: String,
     ips: Vec<String>,
     port: u16,
+    /// the shared socket's bound port (what `localPort` reports)
+    bound_port: u16,
     rack: bool,
     rto_min: Option<u32>,
     wfq: bool,
@@ -487,7 +568,7 @@ impl Task for AcceptTask {
         Ok(Accepted {
             peer: self.id,
             answer,
-            local_port: self.port as u32,
+            local_port: self.bound_port as u32,
         })
     }
 }

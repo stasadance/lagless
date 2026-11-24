@@ -70,7 +70,7 @@ async function offerOf(pc: ndc.PeerConnection): Promise<string> {
   return offer.sdp;
 }
 
-async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sdp: string) => void, ip = '127.0.0.1'): Promise<number> {
+async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sdp: string) => void, ip = '127.0.0.1', pacer = true): Promise<number> {
   const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
   const r = pc.createDataChannel('r');
   const got: Record<'u' | 'r', Buffer[]> = { u: [], r: [] };
@@ -116,7 +116,7 @@ async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sd
   const st = server.stats(acc.peer);
   assert.ok(st);
   assert.strictEqual(st.closed, false);
-  assert.ok(st.rate > 0, 'pacer rate');
+  if (pacer) assert.ok(st.rate > 0, 'pacer rate');
   assert.strictEqual(typeof server.budget(acc.peer), 'number');
   return acc.peer;
 }
@@ -163,6 +163,28 @@ test('IPv6 advertise address over a dual-stack socket', { timeout: 30000 }, asyn
   const pc = new ndc.PeerConnection('v6', { iceServers: [] });
   try {
     await exchange(server, pc, undefined, '::1');
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
+
+test('server-wide egress cap drops unreliable sends past its budget', { timeout: 30000 }, async () => {
+  // 10 KB/s, 100 ms bucket = 1000 B; per-peer pacer off to isolate the cap
+  const server = new Server({ pacer: false, egressRate: 10000, pacerBurstMs: 100 });
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const peer = await exchange(server, pc, undefined, undefined, false);
+    await sleep(150); // refill the bucket
+    const big = Buffer.alloc(900);
+    assert.strictEqual(server.send(peer, 'u', big), true);
+    assert.strictEqual(server.send(peer, 'u', big), false);
+    // reliable always goes, even with the bucket empty
+    assert.strictEqual(server.send(peer, 'r', big), true);
+    const st = server.stats(peer);
+    assert.ok(st);
+    assert.strictEqual(st.egressDrops, 1);
+    assert.strictEqual(st.pacedDrops, 0);
   } finally {
     pc.close();
     server.close();
