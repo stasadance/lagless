@@ -8,13 +8,10 @@ curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal -q
 corepack enable
 cd /w
 pnpm install --frozen-lockfile
-# native build: with --target, napi points the linker at <arch>-linux-musl-gcc, which Alpine
-# doesn't have (its gcc is already the musl one), so only pass it when cross-compiling
-if [ "$1" = "$(rustc -vV | sed -n 's/^host: //p')" ]; then
-  pnpm build:native
-else
-  pnpm build:native --target "$1"
-fi
+# napi sets the linker to <arch>-linux-musl-gcc on musl targets; Alpine's own gcc already is
+# the musl one but has no such name, so give it that name
+ln -sf "$(command -v gcc)" "/usr/local/bin/$(uname -m)-linux-musl-gcc"
+pnpm build:native --target "$1"
 if [ "$2" = test ]; then
   pnpm build:ts
   pnpm test
