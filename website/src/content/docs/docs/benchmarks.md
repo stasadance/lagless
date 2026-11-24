@@ -5,24 +5,42 @@ description: "lagless results vs node-datachannel at 200 ms RTT under packet los
 
 ## Setup
 
-- **Server:** lagless (napi-rs over webrtc-rs `rtc` @ `0fbcaa7`), single peer.
-- **Baseline:** node-datachannel 0.33.6.
+- **Server:** lagless (napi-rs over webrtc-rs `rtc`, fork `256ab18`). Only the **server to client** direction is lagless; **client to server** is Chrome's own SCTP (dcSCTP) in every row.
+- **Baseline:** node-datachannel 0.33.6. "64 KiB + gate" is a verified 64 KiB SCTP send buffer (`sendBufferSize` + `maxMessageSize`, since libdatachannel floors the buffer at `maxMessageSize`, 256 KiB by default) plus dropping unreliable sends while anything is buffered.
 - **Client:** real headless Chromium (dcSCTP). Channel `u` is unordered with `maxRetransmits: 0`, channel `r` is reliable and ordered.
-- **Shaper:** userspace UDP, 100 ms each way, seeded random loss in both directions. No rate cap.
+- **Shaper:** userspace UDP, 100 ms each way, seeded loss in both directions. Optional bandwidth cap with a FIFO queue, Gilbert-Elliott bursty loss, jitter, RTT swing and several peers on one link.
 - **Load:** 25 Hz ticks, 2 × 560 B unreliable state (27 KB/s) + 480 B reliable (12 KB/s). Ping every 200 ms on `u`.
-- 45 s per run after a 3 s warmup, 3 seeds, median across seeds. Times in ms.
+- Same tick order (reliable first) for every server. Times in ms.
 
 ## lagless vs node-datachannel, 5% loss
 
+Worse of 2 seeds, 30 s each.
+
 | config | ping p50 | ping p95 | state age p95 | reliable age p95 |
 |---|---|---|---|---|
-| node-datachannel, naive | 13618 | 26331 | 25773 | 4700 |
-| node-datachannel, 64 KiB + gate | 16211 | 21084 | 20865 | 4313 |
-| lagless, gate | 228 | 485 | 465 | 5992 |
-| lagless, gate + RACK v2 | 237 | 390 | 300 | 5061 |
-| **lagless, gate + RACK v2 + pacer** | **209** | **354** | **273** | **811** |
+| node-datachannel, naive | 12639 | 18386 | 18269 | 4041 |
+| node-datachannel, 64 KiB + gate | 3841 | 6840 | 6730 | 4873 |
+| **lagless, gate + RACK + pacer** | **214** | **341** | **293** | **821** |
 
-## Step by step, 2% and 5% loss
+## Network scenarios
+
+1 seed, 20 s each, so read them as direction. Ping p50 / p95.
+
+| scenario | node-datachannel | ndc 64 KiB + gate | lagless |
+|---|---|---|---|
+| 32 KB/s cap, 1 s queue (bufferbloat) | 5954 / 11035 | 2267 / 3443 | **271 / 440** |
+| 48 KB/s cap, 500 ms queue, 2% loss | 5296 / 9780 | 3615 / 5068 | **237 / 377** |
+| 8 peers on 240 KB/s, 1% loss (worst peer p95) | 11318 | 6766 | **464** |
+| bursty loss (Gilbert-Elliott, ~2% in bursts of ~4) | 268 / 1814 | 219 / 1244 | **202 / 264** |
+| 30 ms jitter (reordering), 1% loss | 4064 / 6508 | 3355 / 5650 | **240 / 390** |
+| RTT swinging 200 → 600 ms, 1% loss | 9195 / 9632 | 859 / 6717 | **419 / 1083** |
+| 400 ms RTT, 2% loss | 10820 / 13644 | 1614 / 7607 | **402 / 607** |
+
+Weak spots: under bursty loss lagless's reliable age p95 is worse (749 vs 303 ms), and under RTT swings the pacer
+drops most unreliable sends (71%) because it reads the swing as queueing. Full table:
+[04-scenarios.md](https://github.com/stasadance/lagless/blob/main/bench/results/04-scenarios.md).
+
+## Step by step, 2% and 5% loss (earlier runtime, 3 seeds × 45 s)
 
 | config | loss | ping p50 | ping p95 | state age p50 | state age p95 | reliable age p50 | reliable age p95 | goodput u/r KB/s | unrel dropped |
 |---|---|---|---|---|---|---|---|---|---|
@@ -44,9 +62,7 @@ At 0% loss every config sits at about 207 ms ping and 103 ms state age.
 
 ## Caveats
 
-- Single peer, Chrome client, random loss only. No bandwidth cap or bufferbloat test yet.
-- The node-datachannel gate didn't reproduce an earlier in-game win with this harness. Treat those rows as "this harness".
-- lagless adds about 6 ms at 0% loss from its 1 ms poll loop.
-- The node-datachannel rows come from the first harness run, which sent unreliable before reliable each tick. The lagless pacer rows send reliable first.
+- Chrome client only. Browser to server is Chrome's dcSCTP everywhere; the numbers are about server to client.
+- Scenario rows are 1 seed. Re-run with `SEEDS="1 2 3" bench/scenarios.sh` for tighter numbers.
 
 Raw data and the harness are in [`bench/`](https://github.com/stasadance/lagless/tree/main/bench). See [Build from source](/lagless/docs/build/#benchmarks) to run it.

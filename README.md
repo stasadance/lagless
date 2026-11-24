@@ -17,8 +17,8 @@
 </p>
 
 <p align="center">
-  <img alt="At 5% packet loss, classic SCTP ping is 13.6 s and lagless ping is 209 ms" src="docs/assets/hero-light.png#gh-light-mode-only" width="720">
-  <img alt="At 5% packet loss, classic SCTP ping is 13.6 s and lagless ping is 209 ms" src="docs/assets/hero-dark.png#gh-dark-mode-only" width="720">
+  <img alt="At 5% packet loss, classic SCTP ping is 12.6 s and lagless ping is 214 ms (server to client)" src="docs/assets/hero-light.png#gh-light-mode-only" width="720">
+  <img alt="At 5% packet loss, classic SCTP ping is 12.6 s and lagless ping is 214 ms (server to client)" src="docs/assets/hero-dark.png#gh-dark-mode-only" width="720">
 </p>
 
 Browsers talk WebRTC data channels, and on lossy links the server side is where lag spikes come from.
@@ -36,7 +36,7 @@ lagless is built so that **stale game state gets dropped, not queued**. Built on
   Losses of unreliable chunks that won't be resent don't cut cwnd.
 - **Honest pings.** Latency probes bypass the gate and the pacer, so ping measures the real queue.
 - **Stats you can act on.** Per-peer queue bytes, cwnd, srtt, min RTT, pacer rate and RACK/RTO counters.
-- **TypeScript API** on npm, with prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64.
+- **TypeScript API** on npm, with prebuilt binaries for Linux x64/arm64 (glibc and musl), macOS x64/arm64 and Windows x64.
 
 ## Install
 
@@ -44,7 +44,7 @@ lagless is built so that **stale game state gets dropped, not queued**. Built on
 pnpm add lagless
 ```
 
-Prebuilt binaries for Linux x64 and arm64 (glibc), macOS x64 and arm64, and Windows x64 ship inside
+Prebuilt binaries for Linux x64 and arm64 (glibc and musl/Alpine), macOS x64 and arm64, and Windows x64 ship inside
 the package, so there's no compile step and no per-platform packages. Node >= 18.
 
 ## Usage
@@ -111,25 +111,29 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 
 ## Results
 
-Headless Chromium client, 200 ms RTT, random loss both ways, 40 KB/s offered
-(27 KB/s unreliable state + 12 KB/s reliable), median of 3 seeds. Ping rides the unreliable channel.
+Headless Chromium client, 200 ms RTT, 5% random loss both ways, 40 KB/s offered
+(27 KB/s unreliable state + 12 KB/s reliable), worse of 2 seeds, same harness and tick order
+(reliable first) for every row. Ping rides the unreliable channel.
+
+**Only server → client is lagless.** Client → server (the ping's outbound leg and anything the
+browser sends) is Chrome's own SCTP (dcSCTP) in every row; no server library can change that.
 
 | 5% loss | ping p50 / p95 | state age p50 / p95 | reliable age p50 / p95 |
 |---|---|---|---|
-| node-datachannel 0.33.6 | 13.6 s / 26.3 s | 12.1 s / 25.8 s | 1.2 s / 4.7 s |
-| node-datachannel + 64 KiB buf + drop gate | 16.2 s / 21.1 s | 13.5 s / 20.9 s | 2.4 s / 4.3 s |
-| **lagless** (gate + RACK + pacer) | **209 ms / 354 ms** | **157 ms / 273 ms** | **404 ms / 811 ms** |
+| node-datachannel 0.33.6 | 12.6 s / 18.4 s | 11.9 s / 18.3 s | 3.4 s / 4.0 s |
+| node-datachannel + 64 KiB buf + drop gate | 3.8 s / 6.8 s | 3.6 s / 6.7 s | 4.0 s / 4.9 s |
+| **lagless** (gate + RACK + pacer) | **214 ms / 341 ms** | **160 ms / 293 ms** | **441 ms / 821 ms** |
 
-node-datachannel rows are from the first run of the harness, which sent unreliable before reliable
-each tick; the lagless row sends reliable first. At 2% loss lagless is 210 / 335 ms ping and 387 / 837 ms reliable age; at 0% it is 207 / 208 ms.
-The pacer runs the link slightly under capacity (about 5–10% less goodput than RACK alone) to keep
-the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
+The node-datachannel gate row uses a verified 64 KiB SCTP send buffer: `sendBufferSize` alone is
+silently raised to 256 KiB by libdatachannel, so the bench also sets `maxMessageSize` (details in
+[`bench/`](bench/)). Bandwidth caps with bufferbloat, 8 peers on one link, bursty loss, jitter,
+RTT swings and 400 ms RTT are in [`bench/results/04-scenarios.md`](bench/results/04-scenarios.md).
+The pacer runs the link slightly under capacity to keep the queue near zero.
 
 ## Limits (v1)
 
 - Host candidate only (no STUN/TURN gathering on the server; clients use their own TURN, see above); non-trickle offers.
 - Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
-- Builds for all five targets; end-to-end tests run on Linux x64 only. No musl (Alpine) build. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.
 
 ## Build
 
@@ -137,15 +141,18 @@ the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 pnpm install
 pnpm build        # native module (napi) + TypeScript wrapper (dist/)
 pnpm typecheck    # lib, tests and bench
-pnpm test         # loopback e2e against node-datachannel
+pnpm test         # loopback e2e + 50-peer load test against node-datachannel
+pnpm test:soak    # memory/thread leak soak with peer churn (SOAK_SECONDS, SOAK_PEERS)
 pnpm test:rust    # pacer unit tests
 ```
 
 ### rtc fork
 
 The WebRTC stack is [stasadance/rtc](https://github.com/stasadance/rtc/tree/lagless), branch `lagless`:
-upstream [webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) v0.21.1 (`0fbcaa7`) plus 4 commits.
-Its rtc-sctp tests (214) run there: `cargo test -p rtc-sctp`.
+upstream [webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) v0.21.1 (`0fbcaa7`, still upstream `master`) plus the
+commits below. The RACK, cwnd and stats commits were later cleaned up into upstream-ready form (rustfmt/clippy
+clean, RTO min capped at 60 s, `TransportStats` non-exhaustive, a stats test, CHANGELOG) and that tree is now the
+branch head. Its rtc-sctp tests (215) run there: `cargo test -p rtc-sctp`.
 
 | commit | what |
 |---|---|
@@ -156,7 +163,7 @@ Its rtc-sctp tests (214) run there: `cargo test -p rtc-sctp`.
 
 ## Release
 
-Bump `version` in `package.json` and merge to `main`. The release workflow builds all five platforms,
+Bump `version` in `package.json` and merge to `main`. The release workflow builds all seven targets,
 puts every binary in the one `lagless` package and publishes it to npm with
 [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token, no tag). A push whose version
 is already on npm publishes nothing.

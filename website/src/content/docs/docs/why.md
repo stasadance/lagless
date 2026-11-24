@@ -23,8 +23,11 @@ At 200 ms RTT and 5% loss, with a real headless Chrome client:
 
 | setup | ping p50 | ping p95 |
 |---|---|---|
-| node-datachannel, naive | 13.6 s | 26.3 s |
-| lagless (gate + RACK-TLP + pacer) | **209 ms** | **354 ms** |
+| node-datachannel, naive | 12.6 s | 18.4 s |
+| node-datachannel, 64 KiB buffer + drop gate | 3.8 s | 6.8 s |
+| lagless (gate + RACK-TLP + pacer) | **214 ms** | **341 ms** |
+
+That is the server to client direction. Client to server is the browser's own SCTP (Chrome dcSCTP) in every row.
 
 Full tables are on the [Benchmarks](/lagless/docs/benchmarks/) page.
 
