@@ -65,9 +65,23 @@ The UDP port every peer shares.
 
 Sends a STUN Binding request from the shared UDP port and resolves with the address the STUN server saw, which is the NAT's mapping for that port. Pass it to `accept(offer, ip, port)`. `stunServer` is `host[:port]` (port 3478 by default, a `stun:` prefix is fine). Retransmits until `timeoutMs`, then rejects. The NAT must let inbound UDP reach that mapping (1:1 NAT or a port forward).
 
-## `accept(offer, advertiseIp, advertisePort = 0)` → `Promise<{ peer, answer, localPort }>`
+## `accept(offer, advertiseIp, advertisePort = 0, { audio }?)` → `Promise<{ peer, answer, localPort, audio? }>`
 
 Accepts an offer, either as a `{ type, sdp }` object or its JSON string. The offer can be sent before ICE gathering finishes (trickle): the server is ICE-lite and learns the client's address from its connectivity checks, so later client candidates aren't needed. Building the peer runs off the JS thread. `answer` is a `{ type, sdp }` object. It carries one host candidate per advertise IP (`advertiseIp` is a string or an array, IPv4 and/or IPv6) at `advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means `localPort`, which is also returned. With several IPs of the same family, inbound packets are tagged with the first one; use them for addresses that reach the same host.
+
+### Audio
+
+Pass `{ audio: { fmtp?, send: [{ ssrc, mid?, streamId?, trackId? }] } }` to answer the offer's Opus audio m-lines on the same peer, port and DTLS session as the data channels (BUNDLE). The server forwards RTP and never encodes.
+
+- The answer uses the Opus payload type the browser offered (`audio.pt`) and `fmtp` (default `minptime=10;useinbandfec=1`).
+- Browser sendonly/sendrecv m-lines become receive m-lines (`audio.recv`): their RTP arrives as `rtp` events.
+- Each `send` entry takes a browser recvonly m-line, its `mid` or the next free one in offer order, and puts its SSRC in the answer (`a=ssrc:<ssrc> cname:<streamId>`, `a=msid:<streamId> <trackId>`), so the browser routes it without header extensions. `audio.send` lists `{ mid, ssrc }`. Recvonly m-lines without an entry are answered inactive.
+- rtc handles SRTCP, sender and receiver reports. NACK and TWCC are off (Opus doesn't need them). RTCP never reaches JS.
+- Without `audio`, audio m-lines are rejected (port 0) and the data channels work as before.
+
+## `sendRtp(peer, mid, data)` → `boolean`
+
+Sends one finished RTP packet (header + payload) on an `audio.send` m-line. Its SSRC and payload type must be the negotiated ones (otherwise rtc refuses it and `error` fires). It is SRTP-encrypted and sent at once: no gate, pacer or egress cap, and it doesn't count against them. Returns `false` until `rtpopen`. Throws if the peer is gone, the server doesn't send on `mid`, or the packet is under 12 bytes.
 
 ## `send(peer, label, data, { exempt }?)` → `boolean`
 
@@ -89,6 +103,8 @@ Fires for every message received from any peer. `Server` is an `EventEmitter`. M
 | `open` | `{ peer }` | ICE and DTLS connected |
 | `channelopen` | `{ peer, label }` | a data channel is open; `send` on it works from now |
 | `close` | `{ peer, reason }` | the peer is gone and already removed (`stats` is `null`, `send` throws). `reason`: `local` (`closePeer`/`close`), `closed` (the browser closed), `failed` (ICE/DTLS failed) |
+| `rtpopen` | `{ peer, mid }` | DTLS-SRTP is up for an audio m-line; `sendRtp` works from now |
+| `rtp` | `{ peer, mid, data }` | an RTP packet (decrypted, header + payload) arrived on a receive audio m-line |
 | `error` | `PeerError` with `.peer` | something failed for one peer, e.g. rtc refused a send. Only emitted when an `error` listener exists, so it never throws |
 
 ## `budget(peer)` → `number`
@@ -113,6 +129,7 @@ Not every field is live. `budget`, `stackOutstanding`, `pendingCmd` and the drop
 | `appLimited` | the last pacer sample was app-limited (app sent less than the link carries) |
 | `dropped`, `pacedDrops`, `egressDrops`, `sentUnreliable` | unreliable sends dropped (all causes) / by the pacer / by the egress cap, and sent |
 | `rackLost`, `rackProbes`, `t3Timeouts` | RACK losses, tail loss probes, RTO timeouts |
+| `audioBytesIn`, `audioBytesOut`, `audioPacketsIn`, `audioPacketsOut` | RTP received and sent (live) |
 
 ## `closePeer(peer)`, `close()`
 

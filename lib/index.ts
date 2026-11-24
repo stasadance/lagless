@@ -1,8 +1,8 @@
 import { EventEmitter } from 'node:events';
 import { Server as NativeServer } from '../binding.js';
-import type { Event as NativeEvent, PeerStats, ServerOptions } from '../binding.js';
+import type { AcceptedAudio, AudioOptions, AudioSend, AudioSlot, Event as NativeEvent, PeerStats, ServerOptions } from '../binding.js';
 
-export type { PeerStats, ServerOptions };
+export type { AcceptedAudio, AudioOptions, AudioSend, AudioSlot, PeerStats, ServerOptions };
 
 export interface Message {
   peer: number;
@@ -22,6 +22,25 @@ export interface Accepted {
   answer: SessionDescription;
   /** UDP port the answer advertises (the server's shared port unless overridden). */
   localPort: number;
+  /** Negotiated audio: set when `audio` was passed and the offer has Opus audio m-lines. */
+  audio?: AcceptedAudio;
+}
+
+export interface AcceptOptions {
+  /**
+   * Answer the offer's Opus audio m-lines (same peer, port and DTLS session as the data
+   * channels). Browser sendonly/sendrecv m-lines become server receive m-lines (`rtp` events);
+   * each `send` entry takes a browser recvonly m-line (`mid`, or the next free one in offer
+   * order) with its SSRC in the answer. Without it, audio m-lines are rejected.
+   */
+  audio?: AudioOptions;
+}
+
+export interface RtpPacket {
+  peer: number;
+  mid: string;
+  /** Decrypted RTP packet, header + payload. */
+  data: Buffer;
 }
 
 export interface SendOptions {
@@ -59,6 +78,10 @@ interface Events {
    * fills the link, unreliable gets nothing): shed reliable load or kick. `false` when it recovers.
    */
   overload: [{ peer: number; overloaded: boolean }];
+  /** An RTP packet arrived on an audio m-line the server receives on. RTCP never shows up here. */
+  rtp: [RtpPacket];
+  /** DTLS-SRTP is up for this audio m-line: sendRtp can go. Closes with the peer. */
+  rtpopen: [{ peer: number; mid: string }];
 }
 
 /**
@@ -96,11 +119,29 @@ export class Server extends EventEmitter<Events> {
    * candidates aren't needed. The answer carries one host candidate per
    * advertise IP (IPv4 and/or IPv6) at `advertisePort`; 0 means the server's port.
    */
-  async accept(offer: SessionDescription | string, advertiseIp: string | string[], advertisePort = 0): Promise<Accepted> {
+  async accept(
+    offer: SessionDescription | string,
+    advertiseIp: string | string[],
+    advertisePort = 0,
+    opts: AcceptOptions = {},
+  ): Promise<Accepted> {
     const offerJson = typeof offer === 'string' ? offer : JSON.stringify(offer);
     this.start();
-    const r = await this.native.acceptOffer(offerJson, advertiseIp, advertisePort);
-    return { peer: r.peer, answer: JSON.parse(r.answer) as SessionDescription, localPort: r.localPort };
+    const r = await this.native.acceptOffer(offerJson, advertiseIp, advertisePort, opts.audio);
+    const acc: Accepted = { peer: r.peer, answer: JSON.parse(r.answer) as SessionDescription, localPort: r.localPort };
+    if (r.audio) acc.audio = r.audio;
+    return acc;
+  }
+
+  /**
+   * Send a finished RTP packet (header + payload) on an audio m-line from `accepted.audio.send`.
+   * Its SSRC and payload type must be the negotiated ones. It is SRTP-encrypted and sent at once:
+   * no backpressure gate, pacer or egress cap. Returns false until `rtpopen`. Throws if the peer
+   * is unknown or closed, the server doesn't send on `mid`, or the packet is under 12 bytes.
+   */
+  sendRtp(peer: number, mid: string, data: Buffer | Uint8Array): boolean {
+    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    return this.native.sendRtp(peer, mid, buf);
   }
 
   /**
@@ -163,6 +204,12 @@ export class Server extends EventEmitter<Events> {
         break;
       case 'overload':
         this.emit('overload', { peer: e.peer, overloaded: e.reason === 'start' });
+        break;
+      case 'rtp':
+        this.emit('rtp', { peer: e.peer, mid: e.mid!, data: e.data! });
+        break;
+      case 'rtpopen':
+        this.emit('rtpopen', { peer: e.peer, mid: e.mid! });
         break;
       case 'error':
         if (this.listenerCount('error') > 0) this.emit('error', new PeerError(e.peer, e.reason ?? 'error'));

@@ -20,7 +20,9 @@ use rtc::peer_connection::event::{RTCDataChannelEvent, RTCPeerConnectionEvent};
 use rtc::peer_connection::message::{RTCMessage, TaggedRTCMessage};
 use rtc::peer_connection::state::RTCPeerConnectionState;
 use rtc::peer_connection::transport::{RTCDtlsTransportState, RTCSctpTransportState};
+use rtc::rtp_transceiver::RTCRtpSenderId;
 use rtc::sansio::Protocol;
+use rtc::shared::marshal::{Marshal, Unmarshal};
 use rtc::shared::{TaggedBytesMut, TransportContext, TransportProtocol};
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
@@ -44,6 +46,10 @@ pub struct NewPeer {
     /// advertised host candidates; inbound packets are tagged with the one of the same family
     pub local_addrs: Vec<SocketAddr>,
     pub shared: Arc<PeerShared>,
+    /// audio mid -> the sender the app's RTP goes out on
+    pub rtp_senders: HashMap<String, RTCRtpSenderId>,
+    /// audio mids that carry RTP, for rtpopen
+    pub audio_mids: Vec<String>,
 }
 
 pub enum Cmd {
@@ -54,6 +60,12 @@ pub enum Cmd {
         label: String,
         data: Vec<u8>,
         is_string: bool,
+    },
+    /// a finished RTP packet for an audio m-line; bypasses gate and pacer
+    Rtp {
+        peer: u32,
+        mid: String,
+        data: Vec<u8>,
     },
     Close(u32),
     /// close a peer gracefully with this reason (e.g. reliable-overflow)
@@ -103,9 +115,38 @@ struct PeerConn {
     sctp_up: bool,
     /// SCTP had data waiting on cwnd at a stats snapshot since the last pacer update
     cwnd_limited: bool,
+    rtp_senders: HashMap<String, RTCRtpSenderId>,
+    audio_mids: Vec<String>,
+    /// inbound track id -> mid, learned on the first packet
+    track_mids: HashMap<String, String>,
 }
 
 impl PeerConn {
+    /// mid of the audio m-line whose receiver owns this track
+    fn mid_of_track(&mut self, track_id: &str) -> Option<String> {
+        if let Some(m) = self.track_mids.get(track_id) {
+            return Some(m.clone());
+        }
+        for t in self.pc.get_transceivers().collect::<Vec<_>>() {
+            let Some(tr) = self.pc.rtp_transceiver(t) else {
+                continue;
+            };
+            let (mid, rid) = (tr.mid().clone(), tr.receiver());
+            let (Some(mid), Some(rid)) = (mid, rid) else {
+                continue;
+            };
+            if self
+                .pc
+                .rtp_receiver(rid)
+                .is_some_and(|r| r.track().track_id() == track_id)
+            {
+                self.track_mids.insert(track_id.to_string(), mid.clone());
+                return Some(mid);
+            }
+        }
+        None
+    }
+
     fn local_for(&self, from: SocketAddr) -> SocketAddr {
         self.local_addrs
             .iter()
@@ -297,6 +338,7 @@ impl Loop {
                     data,
                     is_string,
                 }) => self.send_on(peer, &label, data, is_string),
+                Ok(Cmd::Rtp { peer, mid, data }) => self.send_rtp(peer, &mid, data),
                 Ok(Cmd::Close(id)) => self.remove(id, "local", true),
                 Ok(Cmd::Kick(id, reason)) => self.remove(id, reason, true),
                 Ok(Cmd::CloseAll) => {
@@ -335,6 +377,9 @@ impl Loop {
                 deadline: None,
                 opened: false,
                 sctp_up: false,
+                rtp_senders: np.rtp_senders,
+                audio_mids: np.audio_mids,
+                track_mids: HashMap::new(),
             },
         );
         if self.next_tick.is_none() {
@@ -391,6 +436,35 @@ impl Loop {
         p.shared.pending_cmd.fetch_sub(len, Ordering::AcqRel);
         if let Some(msg) = gate::record_send(&p.shared, label, res) {
             self.out.push(Event::error(id, msg));
+        }
+        self.dirty.insert(id);
+    }
+
+    fn send_rtp(&mut self, id: u32, mid: &str, data: Vec<u8>) {
+        let Some(p) = self.peers.get_mut(&id) else {
+            return;
+        };
+        let len = data.len();
+        let res = match p.rtp_senders.get(mid) {
+            Some(&sid) => rtc::rtp::Packet::unmarshal(&mut &data[..])
+                .map_err(|e| format!("bad RTP packet: {e}"))
+                .and_then(|pkt| match p.pc.rtp_sender(sid) {
+                    Some(mut tx) => tx
+                        .write_rtp(Instant::now(), pkt)
+                        .map_err(|e| e.to_string()),
+                    None => Err("no sender".to_string()),
+                }),
+            None => Err(format!("no audio sender on mid {mid}")),
+        };
+        match res {
+            Ok(()) => {
+                p.shared.audio_bytes_out.fetch_add(len as u64, Ordering::Relaxed);
+                p.shared.audio_packets_out.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(e) => {
+                p.shared.send_errors.fetch_add(1, Ordering::Relaxed);
+                self.out.push(Event::error(id, format!("sendRtp {mid}: {e}")));
+            }
         }
         self.dirty.insert(id);
     }
@@ -538,6 +612,13 @@ impl Loop {
                         if !p.opened {
                             p.opened = true;
                             self.out.push(Event::simple("open", id));
+                            // DTLS is done, so the SRTP keys are in place
+                            if !p.audio_mids.is_empty() {
+                                p.shared.rtp_open.store(true, Ordering::Release);
+                                for mid in &p.audio_mids {
+                                    self.out.push(Event::rtp_open(id, mid.clone()));
+                                }
+                            }
                         }
                     }
                     RTCPeerConnectionState::Failed => dead = Some("failed"),
@@ -575,11 +656,30 @@ impl Loop {
             p.sctp_up |= up;
         }
         while let Some(TaggedRTCMessage { message, .. }) = p.pc.poll_read() {
-            if let RTCMessage::DataChannelMessage(cid, m) = message
-                && let Some(label) = p.learn(cid, &self.priorities)
-            {
-                self.out
-                    .push(Event::message(id, label, m.data.to_vec(), m.is_string));
+            match message {
+                RTCMessage::DataChannelMessage(cid, m) => {
+                    if let Some(label) = p.learn(cid, &self.priorities) {
+                        self.out
+                            .push(Event::message(id, label, m.data.to_vec(), m.is_string));
+                    }
+                }
+                RTCMessage::RtpPacket(track_id, pkt) => {
+                    let Some(mid) = p.mid_of_track(&track_id) else {
+                        continue;
+                    };
+                    match pkt.marshal() {
+                        Ok(b) => {
+                            p.shared
+                                .audio_bytes_in
+                                .fetch_add(b.len() as u64, Ordering::Relaxed);
+                            p.shared.audio_packets_in.fetch_add(1, Ordering::Relaxed);
+                            self.out.push(Event::rtp(id, mid, b.to_vec()));
+                        }
+                        Err(e) => log::debug!("peer {id}: RTP marshal: {e}"),
+                    }
+                }
+                // SRTCP is handled by rtc (reports); RTCP never goes to JS
+                _ => {}
             }
         }
         let mut out = 0usize;

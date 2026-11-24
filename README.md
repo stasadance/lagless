@@ -107,12 +107,14 @@ client against coturn.
 | `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off; unreliable is also dropped while SCTP has > 2400 B unsent), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any), `pacerStartRate` (B/s, 65536), `pacerMinRate` (B/s, 8192), `pacerBurstMs` (100), `egressRate` (B/s, server-wide cap, off) |
 | `localPort` | the UDP port all peers share |
 | `publicAddress(stunServer, timeoutMs = 3000)` | async. STUN Binding from the shared port → `Promise<{ ip, port }>` (the NAT's mapping), for `accept()`. `stunServer` is `host[:port]`, port 3478 by default |
-| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON, complete or sent before gathering finished (trickle; later client candidates aren't needed); `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
+| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON, complete or sent before gathering finished (trickle; later client candidates aren't needed); `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort, audio? }>`. `advertisePort` 0 = `localPort`. 4th arg `{ audio }`: see Audio below |
+| `sendRtp(peer, mid, data)` | a finished RTP packet on an audio m-line from `accepted.audio.send`, SRTP-encrypted and sent at once (no gate, pacer or egress cap). → `boolean`, `false` until `rtpopen`. Throws if the peer is gone, the server doesn't send on `mid`, or `data` < 12 B |
+| `on('rtp' \| 'rtpopen', …)` | `{ peer, mid, data }` decrypted RTP (header + payload) from a receive m-line, never RTCP; `{ peer, mid }` DTLS-SRTP up for that m-line |
 | `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate, budget or egress cap), or reliable hit `reliableLimit` (peer closed, reason `reliable-overflow`). Throws if the peer is gone, the channel isn't open or `data` exceeds the max message size |
 | `on('message', ({ peer, label, data, isString }) => …)` | every inbound message (`isString`: the sender sent a string), all peers (pushed from the native thread, no polling) |
 | `on('open' \| 'channelopen' \| 'close' \| 'error' \| 'overload', …)` | `{ peer }` connected; `{ peer, label }` channel open; `{ peer, reason }` peer gone and removed; `PeerError` (`.peer`), only emitted when an `error` listener exists; `{ peer, overloaded }` reliable overload started/ended |
 | `budget(peer)` | bytes the pacer allows right now (negative after a reliable burst) |
-| `stats(peer)` | `null` once the peer is gone. `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, egressDrops, sentUnreliable, budget, rate, draining, appLimited, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts, sendErrors, overloaded, overloads`. SCTP fields are 50 ms snapshots; `rate`/`draining`/`appLimited` update every max(100 ms, srtt) |
+| `stats(peer)` | `null` once the peer is gone. `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, egressDrops, sentUnreliable, budget, rate, draining, appLimited, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts, sendErrors, overloaded, overloads, audioBytesIn, audioBytesOut, audioPacketsIn, audioPacketsOut`. SCTP fields are 50 ms snapshots; `rate`/`draining`/`appLimited` update every max(100 ms, srtt) |
 | `closePeer(peer)`, `close()` | graceful: SCTP ABORT + DTLS close_notify, so the browser notices at once. `close()` also stops the native thread |
 | `native` | the raw Rust binding |
 
@@ -131,6 +133,16 @@ Notes:
   the gate. Without it SCTP sends first-come-first-served.
 - **Send failures.** A message rtc refuses after `send()` returned `true` emits `error` and bumps
   `stats().sendErrors`.
+- **Audio.** `accept(offer, ip, port, { audio: { fmtp?, send: [{ ssrc, mid?, streamId?, trackId? }] } })`
+  answers the offer's Opus audio m-lines on the same peer, port and DTLS session (BUNDLE), at the
+  payload type the browser offered (`audio.pt`) with `fmtp` (default `minptime=10;useinbandfec=1`).
+  Browser sendonly/sendrecv m-lines become receive m-lines (`audio.recv`, `rtp` events). Each `send`
+  entry takes a browser recvonly m-line (`mid`, or the next free one in offer order) and puts its SSRC
+  in the answer (`a=ssrc:<ssrc> cname:<streamId>`, `msid:<streamId> <trackId>`), so the browser routes
+  it without header extensions; recvonly m-lines without one are answered inactive. rtc does SRTCP and
+  sender/receiver reports itself (no NACK/TWCC). The server never encodes: `sendRtp` packets must
+  carry the slot's SSRC and `audio.pt`. Without `audio`, audio m-lines are rejected and data channels
+  work as before.
 - **Threading.** `send()` admission is atomic (CAS on the reservation and the budget), but it compares
   against the loop's last snapshot of the SCTP queue, so limits can be off by one loop pass of sends.
   Call a Server from one JS thread.
@@ -181,6 +193,8 @@ branch head. Its rtc-sctp tests (215) run there: `cargo test -p rtc-sctp`.
 | 2 | RACK-TLP loss detection (RFC 8985) in rtc-sctp, behind `TransportConfig::with_rack` / `SettingEngine::with_sctp_rack`; configurable RTO min |
 | 3 | RACK: losses of chunks that will not be retransmitted (unreliable, retries or lifetime exhausted) do not cut cwnd |
 | 4 | `Association::transport_stats()` / `RTCPeerConnection::sctp_transport_stats()`: srtt, min RTT, cwnd, in-flight/pending/acked bytes, RACK and T3 counters |
+| 5 | `RTCPeerConnection::add_track_to_transceiver`: attach a send track to one chosen m-line (an answerer's `add_track` takes the first free one, e.g. the mic) |
+| 6 | local ICE candidates go on the first accepted m-line, not a rejected (port 0) one, so an answer that rejects leading audio m-lines still connects |
 
 ## Release
 

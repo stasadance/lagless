@@ -23,7 +23,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # every PR and main push: Linux x64, loopback e2e + TURN + 50-peer load test + Rust tests
+  # every PR and main push: Linux x64, loopback e2e + TURN + 50-peer load test + browser
+  # audio e2e (Chromium, Firefox, WebKit) + Rust tests
   test:
     runs-on: ubuntu-latest
     steps:
@@ -40,9 +41,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y coturn
       - run: pnpm install --frozen-lockfile
+      - run: pnpm exec playwright install --with-deps chromium firefox webkit
       - run: pnpm build
       - run: pnpm typecheck
       - run: pnpm test
+        env:
+          LAGLESS_REQUIRE_BROWSERS: '1'
       - run: pnpm test:rust
 
   # main (or by hand) only: e2e on the other prebuilt platforms, Alpine/musl, and a soak
