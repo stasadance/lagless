@@ -2,7 +2,24 @@ name: ci
 on:
   push:
     branches: [main]
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website.yml"
+      - ".github/workflows/release.yml"
   pull_request:
+    paths-ignore:
+      - "website/**"
+      - "docs/**"
+      - "**.md"
+      - ".github/workflows/website.yml"
+      - ".github/workflows/release.yml"
+
+# one run per branch/PR: a new push cancels the old run
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -16,6 +33,10 @@ jobs:
           cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          # PRs restore main's cache but don't write their own
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: sudo apt-get update && sudo apt-get install -y coturn
       - run: pnpm install --frozen-lockfile
       - run: pnpm build
       - run: pnpm typecheck

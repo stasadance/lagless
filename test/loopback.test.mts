@@ -2,6 +2,8 @@
 import { test, after } from 'node:test';
 import assert from 'node:assert';
 import ndc from 'node-datachannel';
+import { spawn, spawnSync } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { Server } from '../dist/index.js';
 import type { Message } from '../dist/index.js';
 import dgram from 'node:dgram';
@@ -29,6 +31,35 @@ test('client connects, both channels carry data both ways', { timeout: 30000 }, 
   }
 });
 
+// Relay-only client (TURN on the client side) against the ICE-lite server: the
+// server needs no TURN of its own, the TURN server relays UDP to its host candidate.
+const hasCoturn = spawnSync('turnserver', ['--version']).error === undefined;
+test('relay-only client connects through TURN', { timeout: 30000, skip: !hasCoturn && 'coturn (turnserver) not installed' }, async () => {
+  const port = 20000 + Math.floor(Math.random() * 20000);
+  const turn: ChildProcess = spawn('turnserver', [
+    '-n', '--listening-ip=127.0.0.1', '--relay-ip=127.0.0.1', `--listening-port=${port}`,
+    '--lt-cred-mech', '--user=u:p', '--realm=lagless', '--allow-loopback-peers',
+    '--no-cli', '--no-tls', '--no-dtls', '--log-file=stdout',
+  ], { stdio: 'ignore' });
+  await sleep(500);
+  const server = new Server();
+  const pc = new ndc.PeerConnection('client', {
+    iceServers: [`turn:u:p@127.0.0.1:${port}?transport=udp`],
+    iceTransportPolicy: 'relay',
+  });
+  try {
+    await exchange(server, pc, (sdp) => {
+      const cands = sdp.split(/\r?\n/).filter((l) => l.startsWith('a=candidate:'));
+      assert.ok(cands.length > 0, 'client gathered a relay candidate');
+      for (const c of cands) assert.match(c, / typ relay /);
+    });
+  } finally {
+    pc.close();
+    server.close();
+    turn.kill();
+  }
+});
+
 async function offerOf(pc: ndc.PeerConnection): Promise<string> {
   let gathered = false;
   pc.onGatheringStateChange((s) => { if (s === 'complete') gathered = true; });
@@ -39,13 +70,14 @@ async function offerOf(pc: ndc.PeerConnection): Promise<string> {
   return offer.sdp;
 }
 
-async function exchange(server: Server, pc: ndc.PeerConnection, ip = '127.0.0.1'): Promise<number> {
+async function exchange(server: Server, pc: ndc.PeerConnection, checkOffer?: (sdp: string) => void, ip = '127.0.0.1'): Promise<number> {
   const u = pc.createDataChannel('u', { unordered: true, maxRetransmits: 0 });
   const r = pc.createDataChannel('r');
   const got: Record<'u' | 'r', Buffer[]> = { u: [], r: [] };
   u.onMessage((m) => got.u.push(Buffer.from(m as Buffer)));
   r.onMessage((m) => got.r.push(Buffer.from(m as Buffer)));
   const sdp = await offerOf(pc);
+  checkOffer?.(sdp);
 
   const inbox: Message[] = [];
   const opened = new Set<string>();
@@ -130,7 +162,7 @@ test('IPv6 advertise address over a dual-stack socket', { timeout: 30000 }, asyn
   const server = new Server({ bindAddress: '::' });
   const pc = new ndc.PeerConnection('v6', { iceServers: [] });
   try {
-    await exchange(server, pc, '::1');
+    await exchange(server, pc, undefined, '::1');
   } finally {
     pc.close();
     server.close();

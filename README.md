@@ -74,6 +74,24 @@ function tick() {
 Browser side: `pc.createDataChannel('state', { ordered: false, maxRetransmits: 0 })` and
 `pc.createDataChannel('reliable')`, wait for ICE gathering to complete, send `pc.localDescription`.
 
+### NAT, firewalls and TURN
+
+The server is ICE-lite with one public host candidate and needs no STUN or TURN of its own.
+Players behind symmetric NAT or networks that block UDP put a TURN server in the **browser's**
+config; the TURN server relays to the server's host candidate over UDP:
+
+```js
+new RTCPeerConnection({ iceServers: [
+  { urls: ['turn:turn.example.com:3478?transport=udp', 'turns:turn.example.com:443?transport=tcp'],
+    username, credential },
+] })
+```
+
+`turns:` on 443 gets through networks that only allow HTTPS. TCP or TLS to the TURN server adds
+head-of-line blocking on that leg, so expect worse latency under loss than direct UDP. The
+server must accept UDP from the TURN server's relay IPs. The test suite covers a relay-only
+client against coturn.
+
 ### API
 
 | | |
@@ -109,7 +127,7 @@ the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
 ## Limits (v1)
 
-- Host candidate only (no STUN/TURN gathering on the server); non-trickle offers.
+- Host candidate only (no STUN/TURN gathering on the server; clients use their own TURN, see above); non-trickle offers.
 - Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
 - Builds for all five targets; end-to-end tests run on Linux x64 only. No musl (Alpine) build. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.
 
