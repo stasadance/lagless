@@ -95,6 +95,8 @@ struct PeerConn {
     deadline: Option<Instant>,
     opened: bool,
     sctp_up: bool,
+    /// SCTP had data waiting on cwnd at a stats snapshot since the last pacer update
+    cwnd_limited: bool,
 }
 
 impl PeerConn {
@@ -144,6 +146,7 @@ pub struct Loop {
     pending: Arc<AtomicBool>,
     registry: Registry,
     pacer_on: bool,
+    pacer_cfg: pacer::Config,
     overload_ms: u32,
     priorities: HashMap<String, u16>,
     tsfn: Option<Tsfn>,
@@ -163,6 +166,7 @@ pub fn new(
     sock: std::net::UdpSocket,
     registry: Registry,
     pacer_on: bool,
+    pacer_cfg: pacer::Config,
     overload_ms: u32,
     priorities: HashMap<String, u16>,
     tx: Sender<Cmd>,
@@ -190,6 +194,7 @@ pub fn new(
             pending,
             registry,
             pacer_on,
+            pacer_cfg,
             overload_ms,
             priorities,
             tsfn: None,
@@ -299,7 +304,7 @@ impl Loop {
 
     fn add(&mut self, np: NewPeer) {
         let now = Instant::now();
-        let pacer = pacer::Pacer::new(now);
+        let pacer = pacer::Pacer::new(now, self.pacer_cfg);
         if self.pacer_on {
             np.shared.rate.store(pacer.rate as u64, Ordering::Relaxed);
         }
@@ -316,6 +321,7 @@ impl Loop {
                 ids: HashMap::new(),
                 pacer,
                 overload: gate::Overload::new(self.overload_ms),
+                cwnd_limited: false,
                 deadline: None,
                 opened: false,
                 sctp_up: false,
@@ -444,6 +450,8 @@ impl Loop {
                 sh.rack_probes.store(ts.rack_probes, Ordering::Relaxed);
                 sh.t3_timeouts.store(ts.t3_timeouts, Ordering::Relaxed);
                 if self.pacer_on {
+                    p.cwnd_limited |= ts.pending_bytes > 0
+                        || ts.inflight_bytes + ts.mtu as usize > ts.cwnd as usize;
                     let sig = pacer::Signals {
                         acked_total: ts.acked_bytes_total,
                         outstanding: sh.stack_outstanding.load(Ordering::Relaxed)
@@ -451,10 +459,16 @@ impl Loop {
                         srtt: Duration::from_millis(ts.srtt_ms),
                         min_rtt: ts.min_rtt_ms.map(Duration::from_millis),
                         mtu: ts.mtu,
+                        budget_limited: sh.budget_limited.load(Ordering::Relaxed),
+                        cwnd_limited: p.cwnd_limited,
                     };
-                    p.pacer.update(now, &sig);
+                    if p.pacer.update(now, &sig) {
+                        sh.budget_limited.store(false, Ordering::Relaxed);
+                        p.cwnd_limited = false;
+                    }
                     sh.rate.store(p.pacer.rate as u64, Ordering::Relaxed);
                     sh.draining.store(p.pacer.draining, Ordering::Relaxed);
+                    sh.app_limited.store(p.pacer.app_limited, Ordering::Relaxed);
                 }
             }
         }

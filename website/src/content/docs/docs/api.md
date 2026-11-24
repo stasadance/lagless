@@ -48,6 +48,10 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 | `rtoMin` | `1000` | SCTP RTO lower bound in ms (RFC 9260) |
 | `bindAddress` | `"0.0.0.0"` | Local address the server's UDP socket binds to. `"::"` binds dual-stack (IPv4 + IPv6) |
 | `port` | `0` | UDP port every peer shares. `0` picks a free one (see `localPort`) |
+| `pacerStartRate` | `65536` | Pacer rate before the first delivery sample, bytes/s |
+| `pacerMinRate` | `8192` | Pacer rate floor, bytes/s |
+| `pacerBurstMs` | `100` | Token bucket depth in ms of rate (pacer and egress cap) |
+| `egressRate` | off | Server-wide egress cap over all peers, bytes/s. Unreliable sends need budget from it too; reliable always goes. Not fair across peers: first sender in a tick wins |
 
 All peers share one UDP socket and one native thread. Inbound datagrams are matched to peers by remote address, and a new address is matched by the ICE username in its STUN check.
 
@@ -65,7 +69,7 @@ Accepts a complete, non-trickle offer, either as a `{ type, sdp }` object or its
 
 Sends a `Buffer` or `Uint8Array` on the channel named `label`.
 
-- Returns `false` only for unreliable channels, when the gate or the pacer budget refused it. Keep that state owed and send fresher state next tick.
+- Returns `false` only for unreliable channels, when the gate, the pacer budget or the egress cap refused it. Keep that state owed and send fresher state next tick.
 - Reliable sends always go, and spend budget first.
 - `{ exempt: true }` bypasses the gate and the pacer. Use it for ping/pong so ping measures the real queue.
 - Throws if the channel isn't open.
@@ -91,6 +95,8 @@ Bytes the pacer allows right now. It can go negative after a burst of reliable s
 
 `null` for an unknown or closed peer.
 
+Not every field is live. `budget`, `stackOutstanding`, `pendingCmd` and the drop counters are. The SCTP fields (`srttMs`, `minRttMs`, `cwnd`, `inflight`, `pending`, RACK/T3 counters) are snapshots taken every 50 ms. `rate`, `draining` and `appLimited` change once per pacer sample, every max(100 ms, srtt).
+
 | field | meaning |
 |---|---|
 | `connected`, `closed` | connection state |
@@ -100,7 +106,8 @@ Bytes the pacer allows right now. It can go negative after a burst of reliable s
 | `cwnd` | congestion window |
 | `srttMs`, `minRttMs` | SCTP smoothed RTT and min RTT |
 | `rate`, `budget`, `draining` | pacer delivery rate, current tokens, drain mode |
-| `dropped`, `pacedDrops`, `sentUnreliable` | unreliable sends dropped by the gate / pacer, and sent |
+| `appLimited` | the last pacer sample was app-limited (app sent less than the link carries) |
+| `dropped`, `pacedDrops`, `egressDrops`, `sentUnreliable` | unreliable sends dropped (all causes) / by the pacer / by the egress cap, and sent |
 | `rackLost`, `rackProbes`, `t3Timeouts` | RACK losses, tail loss probes, RTO timeouts |
 
 ## `closePeer(peer)`, `close()`

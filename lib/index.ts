@@ -94,7 +94,7 @@ export class Server extends EventEmitter<Events> {
   /**
    * Send on a channel by label. A string is sent as a WebRTC string message (the browser
    * gets a string), bytes as binary. Returns false when an unreliable send was dropped by
-   * the backpressure gate or the pacer (the state is still owed, send fresh state next
+   * the backpressure gate, the pacer or the egress cap (the state is still owed, send fresh state next
    * tick), or when a reliable send hit `reliableLimit` (the peer is then closed, `close`
    * reason `reliable-overflow`). Throws if the peer is unknown or closed, the channel isn't
    * open, or the message is larger than the negotiated max message size.
