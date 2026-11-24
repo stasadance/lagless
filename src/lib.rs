@@ -6,6 +6,7 @@
 //! Unreliable sends are gated on the true SCTP queue and on a per-peer pacer
 //! budget, so stale game state is dropped instead of queued.
 
+mod audio;
 mod event_loop;
 mod gate;
 mod pacer;
@@ -69,6 +70,15 @@ pub(crate) struct PeerShared {
     overloads: AtomicU64,
     /// negotiated SCTP max message size, 0 until known
     max_message_size: AtomicUsize,
+    // audio RTP (never gated or paced)
+    /// mids the server sends RTP on; fixed at accept
+    rtp_send_mids: std::collections::HashSet<String>,
+    /// DTLS-SRTP is up, sendRtp can go
+    rtp_open: AtomicBool,
+    audio_bytes_in: AtomicU64,
+    audio_bytes_out: AtomicU64,
+    audio_packets_in: AtomicU64,
+    audio_packets_out: AtomicU64,
 }
 
 #[napi(object)]
@@ -143,9 +153,51 @@ pub struct Accepted {
     pub peer: u32,
     pub answer: String,
     pub local_port: u32,
+    /// set when `audio` was passed and the offer has Opus audio m-lines
+    pub audio: Option<AcceptedAudio>,
 }
 
-/// One item of a batch pushed to JS. `kind` is message | open | channelopen | close | error | overload.
+/// One audio m-line the server sends on.
+#[napi(object)]
+#[derive(Clone)]
+pub struct AudioSend {
+    /// SSRC the server sends with (goes in the answer's a=ssrc line)
+    pub ssrc: u32,
+    /// the browser's recvonly audio m-line; default: the next one in offer order
+    pub mid: Option<String>,
+    /// a=msid stream id, also the cname. Default "lagless".
+    pub stream_id: Option<String>,
+    /// a=msid track id. Default "audio<index>".
+    pub track_id: Option<String>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct AudioOptions {
+    /// Opus fmtp in the answer. Default "minptime=10;useinbandfec=1".
+    pub fmtp: Option<String>,
+    pub send: Option<Vec<AudioSend>>,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct AudioSlot {
+    pub mid: String,
+    pub ssrc: u32,
+}
+
+#[napi(object)]
+#[derive(Clone)]
+pub struct AcceptedAudio {
+    /// Opus payload type the browser offered (use it in sent packets)
+    pub pt: u32,
+    /// mids the server receives RTP on (browser sendonly/sendrecv)
+    pub recv: Vec<String>,
+    pub send: Vec<AudioSlot>,
+}
+
+/// One item of a batch pushed to JS. `kind` is message | open | channelopen | close | error | overload
+/// | rtp | rtpopen.
 #[napi(object)]
 pub struct Event {
     pub kind: String,
@@ -157,6 +209,8 @@ pub struct Event {
     pub reason: Option<String>,
     /// message: sent as a string (PPID 51/56) rather than binary
     pub is_string: Option<bool>,
+    /// rtp, rtpopen: the audio m-line
+    pub mid: Option<String>,
 }
 
 impl Event {
@@ -168,6 +222,20 @@ impl Event {
             data: None,
             reason: None,
             is_string: None,
+            mid: None,
+        }
+    }
+    pub(crate) fn rtp_open(peer: u32, mid: String) -> Self {
+        Event {
+            mid: Some(mid),
+            ..Self::simple("rtpopen", peer)
+        }
+    }
+    pub(crate) fn rtp(peer: u32, mid: String, data: Vec<u8>) -> Self {
+        Event {
+            mid: Some(mid),
+            data: Some(data.into()),
+            ..Self::simple("rtp", peer)
         }
     }
     pub(crate) fn channel(kind: &str, peer: u32, label: String) -> Self {
@@ -234,6 +302,11 @@ pub struct PeerStats {
     pub overloaded: bool,
     /// times `overloaded` turned true
     pub overloads: f64,
+    /// audio RTP received (decrypted bytes, header + payload) and sent
+    pub audio_bytes_in: f64,
+    pub audio_bytes_out: f64,
+    pub audio_packets_in: f64,
+    pub audio_packets_out: f64,
 }
 
 #[napi]
@@ -374,6 +447,7 @@ impl Server {
         offer_json: String,
         advertise_ip: Either<String, Vec<String>>,
         advertise_port: u32,
+        audio: Option<AudioOptions>,
     ) -> Result<AsyncTask<AcceptTask>> {
         let ips = match advertise_ip {
             Either::A(s) => vec![s],
@@ -397,6 +471,7 @@ impl Server {
             rack: self.rack,
             rto_min: self.rto_min,
             wfq: self.wfq,
+            audio,
             registry: self.registry.clone(),
             ctl: self.ctl.clone(),
         }))
@@ -481,6 +556,43 @@ impl Server {
         Ok(true)
     }
 
+    /// Send one finished RTP packet (header + payload; SSRC and payload type must be the
+    /// ones negotiated for `mid`) on an audio m-line the server sends on. It is SRTP-encrypted
+    /// and sent right away: no backpressure gate, pacer or egress cap. Returns false until
+    /// DTLS-SRTP is up (`rtpopen`). Throws for an unknown or closed peer, a mid the server
+    /// does not send on, or fewer than 12 bytes. rtc refusing the packet (wrong SSRC or
+    /// payload type) emits `error`.
+    #[napi]
+    pub fn send_rtp(&self, peer: u32, mid: String, data: Buffer) -> Result<bool> {
+        let s = self
+            .registry
+            .lock()
+            .unwrap()
+            .get(&peer)
+            .cloned()
+            .ok_or_else(|| Error::from_reason("no such peer"))?;
+        if s.closed.load(Ordering::Acquire) {
+            return Err(Error::from_reason("peer closed"));
+        }
+        if !s.rtp_send_mids.contains(&mid) {
+            return Err(Error::from_reason(format!("no audio sender on mid {mid}")));
+        }
+        if data.len() < 12 {
+            return Err(Error::from_reason("RTP packet shorter than 12 bytes"));
+        }
+        if !s.rtp_open.load(Ordering::Acquire) {
+            return Ok(false);
+        }
+        if !self.ctl.push(Cmd::Rtp {
+            peer,
+            mid,
+            data: data.to_vec(),
+        }) {
+            return Err(Error::from_reason("server closed"));
+        }
+        Ok(true)
+    }
+
     /// Bytes the pacer allows right now (can be negative after reliable sends).
     #[napi]
     pub fn budget(&self, peer: u32) -> f64 {
@@ -523,6 +635,10 @@ impl Server {
             send_errors: s.send_errors.load(Ordering::Relaxed) as f64,
             overloaded: s.overloaded.load(Ordering::Relaxed),
             overloads: s.overloads.load(Ordering::Relaxed) as f64,
+            audio_bytes_in: s.audio_bytes_in.load(Ordering::Relaxed) as f64,
+            audio_bytes_out: s.audio_bytes_out.load(Ordering::Relaxed) as f64,
+            audio_packets_in: s.audio_packets_in.load(Ordering::Relaxed) as f64,
+            audio_packets_out: s.audio_packets_out.load(Ordering::Relaxed) as f64,
         })
     }
 
@@ -571,30 +687,36 @@ pub struct AcceptTask {
     rack: bool,
     rto_min: Option<u32>,
     wfq: bool,
+    audio: Option<AudioOptions>,
     registry: Registry,
     ctl: Ctl,
 }
 
 impl Task for AcceptTask {
-    type Output = String;
+    type Output = (String, Option<AcceptedAudio>);
     type JsValue = Accepted;
 
-    fn compute(&mut self) -> Result<String> {
+    fn compute(&mut self) -> Result<Self::Output> {
         self.build().map_err(|e| Error::from_reason(e.to_string()))
     }
 
-    fn resolve(&mut self, _env: Env, answer: String) -> Result<Accepted> {
+    fn resolve(&mut self, _env: Env, (answer, audio): Self::Output) -> Result<Accepted> {
         Ok(Accepted {
             peer: self.id,
             answer,
             local_port: self.bound_port as u32,
+            audio,
         })
     }
 }
 
 impl AcceptTask {
-    fn build(&mut self) -> anyhow::Result<String> {
-        let offer: RTCSessionDescription = serde_json::from_str(&self.offer_json)?;
+    fn build(&mut self) -> anyhow::Result<(String, Option<AcceptedAudio>)> {
+        let mut offer: RTCSessionDescription = serde_json::from_str(&self.offer_json)?;
+        let audio_plan = match &self.audio {
+            Some(opts) => audio::plan(&mut offer, opts)?,
+            None => None,
+        };
         let mut seb = SettingEngineBuilder::new()
             .with_lite(true)
             .with_sctp_rack(self.rack)
@@ -602,11 +724,19 @@ impl AcceptTask {
         if let Some(ms) = self.rto_min {
             seb = seb.with_sctp_rto_min(ms as u64);
         }
-        let mut pc = RTCPeerConnectionBuilder::new()
+        let mut pcb = RTCPeerConnectionBuilder::new()
             .with_configuration(RTCConfigurationBuilder::new().build())
-            .with_setting_engine(seb.build())
-            .build(Instant::now())?;
+            .with_setting_engine(seb.build());
+        if let Some(plan) = &audio_plan {
+            let (me, reg) = audio::engine(plan)?;
+            pcb = pcb.with_media_engine(me).with_interceptor_registry(reg);
+        }
+        let mut pc = pcb.build(Instant::now())?;
         pc.set_remote_description(Instant::now(), offer)?;
+        let audio_wired = match &audio_plan {
+            Some(plan) => Some(audio::attach(&mut pc, plan)?),
+            None => None,
+        };
         // addresses the peer sees (a shaper/NAT may sit in front); ICE matches inbound by these
         let mut local_addrs = Vec::new();
         for ip in &self.ips {
@@ -629,10 +759,36 @@ impl AcceptTask {
         }
         let answer = pc.create_answer(None)?;
         pc.set_local_description(Instant::now(), answer.clone())?;
-        let answer = pc.local_description().unwrap_or(answer);
+        let mut answer = pc.local_description().unwrap_or(answer);
+        if let Some(plan) = &audio_plan {
+            // only the browser reads the fmtp (how it encodes); rtc refuses a changed answer
+            // in set_local_description and matches packets by payload type alone
+            answer = RTCSessionDescription::answer(audio::set_fmtp(&answer.sdp, plan))?;
+        }
         let ufrag = stun::sdp_ufrag(&answer.sdp)
             .ok_or_else(|| anyhow::anyhow!("answer has no ice-ufrag"))?;
-        let shared = Arc::new(PeerShared::default());
+        let (senders, audio_mids, accepted_audio) = match (audio_wired, &audio_plan) {
+            (Some(w), Some(plan)) => {
+                let acc = AcceptedAudio {
+                    pt: plan.pt as u32,
+                    recv: plan.recv.clone(),
+                    send: plan
+                        .send
+                        .iter()
+                        .map(|s| AudioSlot {
+                            mid: s.mid.clone(),
+                            ssrc: s.ssrc,
+                        })
+                        .collect(),
+                };
+                (w.senders, w.mids, Some(acc))
+            }
+            _ => (HashMap::new(), Vec::new(), None),
+        };
+        let shared = Arc::new(PeerShared {
+            rtp_send_mids: senders.keys().cloned().collect(),
+            ..Default::default()
+        });
         self.registry
             .lock()
             .unwrap()
@@ -643,12 +799,14 @@ impl AcceptTask {
             ufrag,
             local_addrs,
             shared,
+            rtp_senders: senders,
+            audio_mids,
         };
         if !self.ctl.push(Cmd::Add(Box::new(np))) {
             self.registry.lock().unwrap().remove(&self.id);
             anyhow::bail!("server closed");
         }
-        Ok(serde_json::to_string(&answer)?)
+        Ok((serde_json::to_string(&answer)?, accepted_audio))
     }
 }
 
