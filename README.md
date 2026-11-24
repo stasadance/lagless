@@ -52,13 +52,15 @@ the package, so there's no compile step and no per-platform packages. Node >= 18
 ```ts
 import { Server } from 'lagless';
 
-const server = new Server(); // defaults: unreliableLimit 65536, rack true, pacer true, bindAddress '0.0.0.0'
+const server = new Server({ port: 7000 }); // one UDP port for every peer; defaults: unreliableLimit 65536, rack true, pacer true
 
 // signaling is yours: get the browser's offer (gather complete, non-trickle) over HTTP/WebSocket
-const { peer, answer } = server.accept(offer, PUBLIC_IP);
+const { peer, answer } = await server.accept(offer, PUBLIC_IP); // or [PUBLIC_IPV4, PUBLIC_IPV6]
 // -> send `answer` ({ type, sdp }) back to the browser
 
 server.on('message', ({ peer, label, data }) => handle(peer, label, data));
+server.on('channelopen', ({ peer, label }) => { /* can send on `label` now */ });
+server.on('close', ({ peer, reason }) => forget(peer)); // 'local' | 'closed' | 'failed'; peer is already removed
 
 function tick() {
   server.send(peer, 'reliable', events);            // reliable: always queued
@@ -94,13 +96,15 @@ client against coturn.
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
-| `accept(offer, advertiseIp, advertisePort = 0)` | `offer` is `{ type, sdp }` or its JSON. → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any) |
+| `localPort` | the UDP port all peers share |
+| `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON; `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
 | `send(peer, label, data, { exempt }?)` | → `boolean`. `false` only for unreliable channels (gate or budget). Throws if the channel isn't open |
-| `on('message', ({ peer, label, data }) => …)` | every inbound message, all peers |
+| `on('message', ({ peer, label, data }) => …)` | every inbound message, all peers (pushed from the native thread, no polling) |
+| `on('open' \| 'channelopen' \| 'close' \| 'error', …)` | `{ peer }` connected; `{ peer, label }` channel open; `{ peer, reason }` peer gone and removed; `PeerError` (`.peer`), only emitted when an `error` listener exists |
 | `budget(peer)` | bytes the pacer allows right now (negative after a reliable burst) |
-| `stats(peer)` | `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts` |
-| `closePeer(peer)`, `close()` | |
+| `stats(peer)` | `null` once the peer is gone. `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts` |
+| `closePeer(peer)`, `close()` | graceful: SCTP ABORT + DTLS close_notify, so the browser notices at once. `close()` also stops the native thread |
 | `native` | the raw Rust binding |
 
 Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
@@ -123,7 +127,6 @@ the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
 ## Limits (v1)
 
-- One worker thread and one UDP socket per peer. No single-port mux yet.
 - Host candidate only (no STUN/TURN gathering on the server; clients use their own TURN, see above); non-trickle offers.
 - Browser to server direction still uses the browser's own SCTP (Chrome dcSCTP); the wins are server to client.
 - Builds for all five targets; end-to-end tests run on Linux x64 only. No musl (Alpine) build. The shaper does random loss only; no bandwidth-cap / bufferbloat tests yet.

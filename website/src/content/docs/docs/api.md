@@ -8,13 +8,14 @@ description: "The lagless server API: accept, send, on('message'), budget and st
 ```ts
 import { Server } from "lagless";
 
-const server = new Server(); // unreliableLimit 65536, rack true, pacer true, bindAddress "0.0.0.0"
+const server = new Server({ port: 7000 }); // one UDP port for every peer; unreliableLimit 65536, rack true, pacer true
 
 // Signaling is yours: get the browser's offer (gathering complete, non-trickle) over HTTP or WebSocket.
-const { peer, answer } = server.accept(offer, PUBLIC_IP);
+const { peer, answer } = await server.accept(offer, PUBLIC_IP); // or [PUBLIC_IPV4, PUBLIC_IPV6]
 // Send `answer` ({ type, sdp }) back to the browser.
 
 server.on("message", ({ peer, label, data }) => handle(peer, label, data));
+server.on("close", ({ peer, reason }) => forget(peer)); // peer is already removed
 
 function tick() {
     server.send(peer, "reliable", events); // reliable: always queued
@@ -45,14 +46,20 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 | `rack` | `true` | RACK-TLP loss detection on the SCTP association |
 | `pacer` | `true` | Per-peer send pacer: unreliable sends need budget tokens |
 | `rtoMin` | `1000` | SCTP RTO lower bound in ms (RFC 9260) |
-| `bindAddress` | `"0.0.0.0"` | Local address peer sockets bind to |
-| `drainIntervalMs` | `1` | How often received messages are pulled from the native side, in ms |
+| `bindAddress` | `"0.0.0.0"` | Local address the server's UDP socket binds to. `"::"` binds dual-stack (IPv4 + IPv6) |
+| `port` | `0` | UDP port every peer shares. `0` picks a free one (see `localPort`) |
+
+All peers share one UDP socket and one native thread. Inbound datagrams are matched to peers by remote address, and a new address is matched by the ICE username in its STUN check.
 
 64 KiB is a good default. Smaller caps throughput for no gain: 64 KiB still carries about 120 KB/s at 300 ms RTT.
 
-## `accept(offer, advertiseIp, advertisePort = 0)` → `{ peer, answer, localPort }`
+## `localPort`
 
-Accepts a complete, non-trickle offer, either as a `{ type, sdp }` object or its JSON string. `answer` is a `{ type, sdp }` object. It carries one host candidate `advertiseIp:advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means the port the peer's socket bound to, which is also returned as `localPort`.
+The UDP port every peer shares.
+
+## `accept(offer, advertiseIp, advertisePort = 0)` → `Promise<{ peer, answer, localPort }>`
+
+Accepts a complete, non-trickle offer, either as a `{ type, sdp }` object or its JSON string. Building the peer runs off the JS thread. `answer` is a `{ type, sdp }` object. It carries one host candidate per advertise IP (`advertiseIp` is a string or an array, IPv4 and/or IPv6) at `advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means `localPort`, which is also returned. With several IPs of the same family, inbound packets are tagged with the first one; use them for addresses that reach the same host.
 
 ## `send(peer, label, data, { exempt }?)` → `boolean`
 
@@ -65,7 +72,16 @@ Sends a `Buffer` or `Uint8Array` on the channel named `label`.
 
 ## `on("message", ({ peer, label, data }) => …)`
 
-Fires for every message received from any peer. `Server` is an `EventEmitter`.
+Fires for every message received from any peer. `Server` is an `EventEmitter`. Messages and events are pushed in batches from the native thread; nothing polls.
+
+## Lifecycle events
+
+| event | payload | when |
+|---|---|---|
+| `open` | `{ peer }` | ICE and DTLS connected |
+| `channelopen` | `{ peer, label }` | a data channel is open; `send` on it works from now |
+| `close` | `{ peer, reason }` | the peer is gone and already removed (`stats` is `null`, `send` throws). `reason`: `local` (`closePeer`/`close`), `closed` (the browser closed), `failed` (ICE/DTLS failed) |
+| `error` | `PeerError` with `.peer` | something failed for one peer, e.g. rtc refused a send. Only emitted when an `error` listener exists, so it never throws |
 
 ## `budget(peer)` → `number`
 
@@ -73,14 +89,14 @@ Bytes the pacer allows right now. It can go negative after a burst of reliable s
 
 ## `stats(peer)` → `PeerStats | null`
 
-`null` for an unknown peer.
+`null` for an unknown or closed peer.
 
 | field | meaning |
 |---|---|
 | `connected`, `closed` | connection state |
 | `stackOutstanding` | bytes SCTP hasn't released yet: pending + in flight |
 | `pending`, `inflight` | queued but unsent, sent but unacked |
-| `pendingCmd` | sends waiting for the peer's worker thread |
+| `pendingCmd` | sends waiting for the native event loop |
 | `cwnd` | congestion window |
 | `srttMs`, `minRttMs` | SCTP smoothed RTT and min RTT |
 | `rate`, `budget`, `draining` | pacer delivery rate, current tokens, drain mode |
@@ -89,7 +105,7 @@ Bytes the pacer allows right now. It can go negative after a burst of reliable s
 
 ## `closePeer(peer)`, `close()`
 
-Close one peer, or close every peer and stop emitting messages.
+Close one peer, or close every peer and stop the native thread. Both are graceful: SCTP ABORT and DTLS close_notify go out, so the browser notices at once, and a `close` event follows for each peer.
 
 ## `native`
 

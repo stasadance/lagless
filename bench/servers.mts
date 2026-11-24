@@ -25,7 +25,7 @@ export function rtcServer({ gate, rack = false, rtoMin, pace = false }: RtcServe
   return {
     name: `rtc-${gate ? 'gate' : 'naive'}${rack ? '-rack' : ''}${pace ? '-pace' : ''}${rtoMin ? '-rto' + rtoMin : ''}`,
     async accept(offerJson, shaperPort) {
-      const r = srv.accept(offerJson, '127.0.0.1', shaperPort);
+      const r = await srv.accept(offerJson, '127.0.0.1', shaperPort);
       peer = r.peer;
       return { answer: JSON.stringify(r.answer), localPort: r.localPort };
     },
