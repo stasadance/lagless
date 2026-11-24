@@ -3,13 +3,17 @@ title: Introduction
 description: "lagless is a Node.js module for fast WebRTC data channels in io games: high packet loss, no ping spikes."
 ---
 
-lagless is a Node.js server module for WebRTC data channels, built for real-time browser games. It's a native [napi-rs](https://napi.rs) binding over the [webrtc-rs `rtc`](https://github.com/webrtc-rs/rtc) sans-IO core, with the API shape of node-datachannel.
+lagless is a Node.js server module for WebRTC data channels, built for real-time browser games. It's a native [napi-rs](https://napi.rs) binding over the [webrtc-rs `rtc`](https://github.com/webrtc-rs/rtc) sans-IO core, with a small TypeScript API on top.
 
 The goal: ping stays near the real round-trip time even at 5% packet loss, instead of spiking to seconds.
 
-:::note[v0.1.0]
-lagless isn't published to npm yet. Until it is, [build it from source](/lagless/docs/build/).
-:::
+## Install
+
+```sh
+pnpm add lagless
+```
+
+Node.js 18+. Prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. On anything else, [build from source](/lagless/docs/build/). Then head to the [API](/lagless/docs/api/).
 
 ## What you get
 

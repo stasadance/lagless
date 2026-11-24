@@ -6,6 +6,11 @@
 <p align="center">Low-latency WebRTC data channels for io games. Rust core, Node.js API.</p>
 
 <p align="center">
+  <a href="https://www.npmjs.com/package/lagless"><img alt="npm" src="https://img.shields.io/npm/v/lagless?color=1238c4"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/npm/l/lagless?color=1238c4"></a>
+</p>
+
+<p align="center">
   <a href="https://stasadance.github.io/lagless/">Website</a> ·
   <a href="https://stasadance.github.io/lagless/docs/">Docs</a> ·
   <a href="https://stasadance.github.io/lagless/docs/benchmarks/">Benchmarks</a>
@@ -31,15 +36,7 @@ lagless is built so that **stale game state gets dropped, not queued**. Built on
   Losses of unreliable chunks that won't be resent don't cut cwnd.
 - **Honest pings.** Latency probes bypass the gate and the pacer, so ping measures the real queue.
 - **Stats you can act on.** Per-peer queue bytes, cwnd, srtt, min RTT, pacer rate and RACK/RTO counters.
-- **TypeScript API** with prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64.
-
-## Install
-
-lagless isn't on npm yet. Until the first release, [build it from source](#build).
-
-```sh
-pnpm add lagless   # once published
-```
+- **TypeScript API** on npm, with prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64.
 
 ## Install
 

@@ -3,7 +3,7 @@ title: Build from source
 description: "How to build, test and release lagless from source."
 ---
 
-lagless isn't published to npm yet. Prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64 will ship with the first release.
+The npm package ships prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. Build from source on other platforms, or to work on lagless itself.
 
 ## Requirements
 
