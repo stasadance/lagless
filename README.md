@@ -146,6 +146,9 @@ Notes:
 - **Threading.** `send()` admission is atomic (CAS on the reservation and the budget), but it compares
   against the loop's last snapshot of the SCTP queue, so limits can be off by one loop pass of sends.
   Call a Server from one JS thread.
+- **Logging.** Silent by default. Set `LAGLESS_LOG` (env_logger filter syntax, e.g. `LAGLESS_LOG=debug`)
+  to print native logs to stderr. Browsers' mDNS `.local` host candidates are ignored, not resolved;
+  the ICE-lite server learns the real address from the browser's checks (peer-reflexive).
 
 ## Results
 
