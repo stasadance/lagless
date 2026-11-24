@@ -11,7 +11,11 @@ export default defineConfig({
             title: "lagless",
             description:
                 "Low-latency WebRTC data channels for real-time games, in Rust for Node.js. No ping spikes under packet loss.",
-            logo: { src: "./src/assets/mark.svg" },
+            logo: {
+                light: "./src/assets/logo-light.svg",
+                dark: "./src/assets/logo-dark.svg",
+                replacesTitle: true,
+            },
             favicon: "/favicon.svg",
             head: [
                 {

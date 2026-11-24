@@ -1,10 +1,26 @@
-# lagless
+<p align="center">
+  <img alt="lagless" src="docs/assets/logo-light.svg#gh-light-mode-only" width="320">
+  <img alt="lagless" src="docs/assets/logo-dark.svg#gh-dark-mode-only" width="320">
+</p>
 
-Low-latency WebRTC data channels for real-time games, as a Node.js native module.
-Rust ([webrtc-rs `rtc`](https://github.com/webrtc-rs/rtc), sans-I/O) + [napi-rs](https://napi.rs).
+<p align="center">Low-latency WebRTC data channels for io games. Rust core, Node.js API.</p>
 
-Browsers talk WebRTC data channels; the server side is where lag spikes come from on lossy links.
-lagless is built so that **stale game state gets dropped, not queued**:
+<p align="center">
+  <a href="https://stasadance.github.io/lagless/">Website</a> ·
+  <a href="https://stasadance.github.io/lagless/docs/">Docs</a> ·
+  <a href="https://stasadance.github.io/lagless/docs/benchmarks/">Benchmarks</a>
+</p>
+
+<p align="center">
+  <img alt="At 5% packet loss, classic SCTP ping is 13.6 s and lagless ping is 209 ms" src="docs/assets/hero-light.png#gh-light-mode-only" width="720">
+  <img alt="At 5% packet loss, classic SCTP ping is 13.6 s and lagless ping is 209 ms" src="docs/assets/hero-dark.png#gh-dark-mode-only" width="720">
+</p>
+
+Browsers talk WebRTC data channels, and on lossy links the server side is where lag spikes come from.
+lagless is built so that **stale game state gets dropped, not queued**. Built on
+[webrtc-rs `rtc`](https://github.com/webrtc-rs/rtc) (sans-I/O) and [napi-rs](https://napi.rs).
+
+## Features
 
 - **True-queue gate.** Unreliable sends are refused when bytes SCTP hasn't released yet (pending +
   in flight) would exceed 64 KiB. No hidden library buffer, so `send()` returning `false` is honest.
@@ -13,22 +29,17 @@ lagless is built so that **stale game state gets dropped, not queued**:
 - **RACK-TLP** (RFC 8985) in SCTP. Loss is detected by time, not 3 dup SACKs, and a tail loss
   probe fires after ~2·SRTT instead of waiting for a 1 s RTO that collapses cwnd.
   Losses of unreliable chunks that won't be resent don't cut cwnd.
+- **Honest pings.** Latency probes bypass the gate and the pacer, so ping measures the real queue.
+- **Stats you can act on.** Per-peer queue bytes, cwnd, srtt, min RTT, pacer rate and RACK/RTO counters.
+- **TypeScript API** with prebuilt binaries for Linux x64/arm64, macOS x64/arm64 and Windows x64.
 
-## Results
+## Install
 
-Headless Chromium client, 200 ms RTT, random loss both ways, 40 KB/s offered
-(27 KB/s unreliable state + 12 KB/s reliable), median of 3 seeds. Ping rides the unreliable channel.
+lagless isn't on npm yet. Until the first release, [build it from source](#build).
 
-| 5% loss | ping p50 / p95 | state age p50 / p95 | reliable age p50 / p95 |
-|---|---|---|---|
-| node-datachannel 0.33.6 | 13.6 s / 26.3 s | 12.1 s / 25.8 s | 1.2 s / 4.7 s |
-| node-datachannel + 64 KiB buf + drop gate | 16.2 s / 21.1 s | 13.5 s / 20.9 s | 2.4 s / 4.3 s |
-| **lagless** (gate + RACK + pacer) | **209 ms / 354 ms** | **157 ms / 273 ms** | **404 ms / 811 ms** |
-
-node-datachannel rows are from the first run of the harness, which sent unreliable before reliable
-each tick; the lagless row sends reliable first. At 2% loss lagless is 210 / 335 ms ping and 387 / 837 ms reliable age; at 0% it is 207 / 208 ms.
-The pacer runs the link slightly under capacity (about 5–10% less goodput than RACK alone) to keep
-the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
+```sh
+pnpm add lagless   # once published
+```
 
 ## Install
 
@@ -78,6 +89,22 @@ Browser side: `pc.createDataChannel('state', { ordered: false, maxRetransmits: 0
 | `native` | the raw Rust binding |
 
 Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
+
+## Results
+
+Headless Chromium client, 200 ms RTT, random loss both ways, 40 KB/s offered
+(27 KB/s unreliable state + 12 KB/s reliable), median of 3 seeds. Ping rides the unreliable channel.
+
+| 5% loss | ping p50 / p95 | state age p50 / p95 | reliable age p50 / p95 |
+|---|---|---|---|
+| node-datachannel 0.33.6 | 13.6 s / 26.3 s | 12.1 s / 25.8 s | 1.2 s / 4.7 s |
+| node-datachannel + 64 KiB buf + drop gate | 16.2 s / 21.1 s | 13.5 s / 20.9 s | 2.4 s / 4.3 s |
+| **lagless** (gate + RACK + pacer) | **209 ms / 354 ms** | **157 ms / 273 ms** | **404 ms / 811 ms** |
+
+node-datachannel rows are from the first run of the harness, which sent unreliable before reliable
+each tick; the lagless row sends reliable first. At 2% loss lagless is 210 / 335 ms ping and 387 / 837 ms reliable age; at 0% it is 207 / 208 ms.
+The pacer runs the link slightly under capacity (about 5–10% less goodput than RACK alone) to keep
+the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
 ## Limits (v1)
 
