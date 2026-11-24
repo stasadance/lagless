@@ -45,9 +45,4 @@ Kinds: `ndc` (node-datachannel), `rtc` (lagless, gate only), `+rack`, `+pace`, `
 
 ## Release
 
-```sh
-pnpm version patch
-git push --follow-tags
-```
-
-CI builds all five platforms and publishes a single `lagless` package with every binary bundled, using trusted publishing.
+Bump `version` in `package.json` and merge to `main`. The release workflow builds all five platforms, puts every binary in the one `lagless` package and publishes it to npm with trusted publishing (no token, no tag). A push whose version is already on npm publishes nothing.
