@@ -1,0 +1,33 @@
+/* lagless "Spec": blueprint ink on cool paper; navy night in dark mode. */
+:root {
+    --ll-ink: #1238c4;
+    --sl-font: "IBM Plex Sans", system-ui, sans-serif;
+    --sl-font-mono: "IBM Plex Mono", ui-monospace, monospace;
+    --sl-color-accent-low: #1a2c6b;
+    --sl-color-accent: #6f8cff;
+    --sl-color-accent-high: #d6defc;
+    --sl-color-black: #0a1024;
+    --sl-color-gray-6: #111a36;
+    --sl-color-gray-5: #1f2a4d;
+}
+:root[data-theme="light"] {
+    --sl-color-accent-low: #d6defc;
+    --sl-color-accent: #1238c4;
+    --sl-color-accent-high: #0c1633;
+    --sl-color-white: #0c1633;
+    --sl-color-black: #eef2f7;
+    --sl-color-gray-7: #e4e9f2;
+    --sl-color-gray-6: #d7deea;
+    --sl-color-gray-5: #c4cfe3;
+}
+h1,
+h2,
+h3,
+.site-title {
+    font-family: "Archivo", "IBM Plex Sans", system-ui, sans-serif;
+    letter-spacing: -0.01em;
+}
+.sl-markdown-content table {
+    font-family: var(--sl-font-mono);
+    font-variant-numeric: tabular-nums;
+}
