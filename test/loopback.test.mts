@@ -176,3 +176,87 @@ test('unknown channel and unknown peer are errors', () => {
   assert.strictEqual(server.budget(42), 0);
   server.close();
 });
+
+/** Connect one client with the given channels; resolves once the server can send on all of them. */
+async function connect(server: Server, pc: ndc.PeerConnection, labels: string[]) {
+  const chans = new Map(labels.map((l) => [l, pc.createDataChannel(l)]));
+  const order: string[] = [];
+  const got: (string | Buffer)[] = [];
+  for (const [l, dc] of chans) {
+    dc.onMessage((m) => { order.push(l); got.push(typeof m === 'string' ? m : Buffer.from(m as Buffer)); });
+  }
+  const sdp = await offerOf(pc);
+  const inbox: Message[] = [];
+  const opened = new Set<string>();
+  const acc = await server.accept({ type: 'offer', sdp }, '127.0.0.1');
+  server.on('message', (m) => { if (m.peer === acc.peer) inbox.push(m); });
+  server.on('channelopen', (e) => { if (e.peer === acc.peer) opened.add(e.label); });
+  pc.setRemoteDescription(acc.answer.sdp, 'answer');
+  await waitFor('client channels open', () => [...chans.values()].every((c) => c.isOpen()));
+  // a client->server message per channel makes the server learn it even before OnOpen ordering
+  for (const c of chans.values()) c.sendMessageBinary(Buffer.from('hi'));
+  await waitFor('server channels open', () => labels.every((l) => opened.has(l)));
+  await waitFor('hellos', () => inbox.length >= labels.length);
+  inbox.length = 0;
+  return { peer: acc.peer, chans, order, got, inbox };
+}
+
+test('string messages keep their type both ways', { timeout: 30000 }, async () => {
+  const server = new Server();
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const { peer, chans, got, inbox } = await connect(server, pc, ['r']);
+    const r = chans.get('r')!;
+    r.sendMessage('hi-text');
+    r.sendMessageBinary(Buffer.from('hi-bin'));
+    await waitFor('server inbox', () => inbox.length >= 2);
+    assert.deepStrictEqual(inbox.map((m) => [m.data.toString(), m.isString]), [['hi-text', true], ['hi-bin', false]]);
+    assert.strictEqual(server.send(peer, 'r', 'yo-text'), true);
+    assert.strictEqual(server.send(peer, 'r', Buffer.from('yo-bin')), true);
+    await waitFor('client inbox', () => got.length >= 2);
+    assert.strictEqual(got[0], 'yo-text');
+    assert.ok(Buffer.isBuffer(got[1]) && got[1].toString() === 'yo-bin');
+    assert.strictEqual(server.stats(peer)?.sendErrors, 0);
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
+
+test('reliable byte cap kicks the peer with reason reliable-overflow', { timeout: 30000 }, async () => {
+  const server = new Server({ reliableLimit: 64 * 1024 });
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const { peer } = await connect(server, pc, ['r']);
+    let reason: string | undefined;
+    server.on('close', (e) => { if (e.peer === peer) reason = e.reason; });
+    const chunk = Buffer.alloc(16 * 1024);
+    let ok = 0;
+    while (server.send(peer, 'r', chunk)) ok++;
+    assert.ok(ok >= 1 && ok < 64, `sent ${ok} chunks before overflow`);
+    assert.throws(() => server.send(peer, 'r', chunk), /peer closed|no such peer/);
+    await waitFor('close event', () => reason !== undefined);
+    assert.strictEqual(reason, 'reliable-overflow');
+    assert.strictEqual(server.stats(peer), null);
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
+
+test('channelPriority lets a high channel jump a reliable backlog', { timeout: 30000 }, async () => {
+  const server = new Server({ pacer: false, reliableLimit: 0, channelPriority: { hi: 1024 } });
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const { peer, order } = await connect(server, pc, ['bulk', 'hi']);
+    const N = 200;
+    for (let i = 0; i < N; i++) server.send(peer, 'bulk', Buffer.alloc(16 * 1024));
+    server.send(peer, 'hi', Buffer.from('pong'));
+    await waitFor('all delivered', () => order.length >= N + 1, 20000);
+    const at = order.indexOf('hi');
+    assert.ok(at < N / 2, `pong arrived after ${at} of ${N} bulk messages`);
+  } finally {
+    pc.close();
+    server.close();
+  }
+});

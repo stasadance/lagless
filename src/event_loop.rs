@@ -6,6 +6,7 @@
 //! ufrag in its STUN Binding request. Inbound messages and lifecycle events are
 //! batched and pushed to JS through one ThreadsafeFunction call per wakeup.
 
+use crate::gate;
 use crate::pacer;
 use crate::{Event, PeerShared, Registry};
 use bytes::BytesMut;
@@ -52,8 +53,11 @@ pub enum Cmd {
         peer: u32,
         label: String,
         data: Vec<u8>,
+        is_string: bool,
     },
     Close(u32),
+    /// close a peer gracefully with this reason (e.g. reliable-overflow)
+    Kick(u32, &'static str),
     CloseAll,
     Shutdown,
 }
@@ -87,6 +91,7 @@ struct PeerConn {
     labels: HashMap<RTCDataChannelId, String>,
     ids: HashMap<String, RTCDataChannelId>,
     pacer: pacer::Pacer,
+    overload: gate::Overload,
     deadline: Option<Instant>,
     opened: bool,
     sctp_up: bool,
@@ -103,12 +108,17 @@ impl PeerConn {
 
     /// Register a channel by id; returns its label. Also covers a message that
     /// shows up for a channel we have not seen OnOpen for yet.
-    fn learn(&mut self, cid: RTCDataChannelId) -> Option<String> {
+    fn learn(&mut self, cid: RTCDataChannelId, priorities: &HashMap<String, u16>) -> Option<String> {
         if let Some(l) = self.labels.get(&cid) {
             return Some(l.clone());
         }
-        let dc = self.pc.data_channel(cid)?;
+        let mut dc = self.pc.data_channel(cid)?;
         let label = dc.label().to_string();
+        if let Some(&w) = priorities.get(&label)
+            && let Err(e) = dc.set_priority(w)
+        {
+            log::debug!("set_priority {label}: {e}");
+        }
         let unreliable = dc.max_retransmits().is_some() || dc.max_packet_life_time().is_some();
         self.labels.insert(cid, label.clone());
         self.ids.insert(label.clone(), cid);
@@ -117,6 +127,11 @@ impl PeerConn {
             .lock()
             .unwrap()
             .insert(label.clone(), unreliable);
+        if let Some(max) = self.pc.sctp().and_then(|t| t.max_message_size()) {
+            self.shared
+                .max_message_size
+                .store(max as usize, Ordering::Relaxed);
+        }
         Some(label)
     }
 }
@@ -129,6 +144,8 @@ pub struct Loop {
     pending: Arc<AtomicBool>,
     registry: Registry,
     pacer_on: bool,
+    overload_ms: u32,
+    priorities: HashMap<String, u16>,
     tsfn: Option<Tsfn>,
     peers: HashMap<u32, PeerConn>,
     by_addr: HashMap<SocketAddr, u32>,
@@ -146,6 +163,8 @@ pub fn new(
     sock: std::net::UdpSocket,
     registry: Registry,
     pacer_on: bool,
+    overload_ms: u32,
+    priorities: HashMap<String, u16>,
     tx: Sender<Cmd>,
     rx: Receiver<Cmd>,
 ) -> std::io::Result<(Loop, Ctl)> {
@@ -171,6 +190,8 @@ pub fn new(
             pending,
             registry,
             pacer_on,
+            overload_ms,
+            priorities,
             tsfn: None,
             peers: HashMap::new(),
             by_addr: HashMap::new(),
@@ -256,8 +277,14 @@ impl Loop {
                     }
                 }
                 Ok(Cmd::Add(np)) => self.add(*np),
-                Ok(Cmd::Send { peer, label, data }) => self.send_on(peer, &label, data),
+                Ok(Cmd::Send {
+                    peer,
+                    label,
+                    data,
+                    is_string,
+                }) => self.send_on(peer, &label, data, is_string),
                 Ok(Cmd::Close(id)) => self.remove(id, "local", true),
+                Ok(Cmd::Kick(id, reason)) => self.remove(id, reason, true),
                 Ok(Cmd::CloseAll) => {
                     let ids: Vec<u32> = self.peers.keys().copied().collect();
                     for id in ids {
@@ -288,6 +315,7 @@ impl Loop {
                 labels: HashMap::new(),
                 ids: HashMap::new(),
                 pacer,
+                overload: gate::Overload::new(self.overload_ms),
                 deadline: None,
                 opened: false,
                 sctp_up: false,
@@ -307,7 +335,7 @@ impl Loop {
         }
     }
 
-    fn send_on(&mut self, id: u32, label: &str, data: Vec<u8>) {
+    fn send_on(&mut self, id: u32, label: &str, data: Vec<u8>, is_string: bool) {
         let Some(p) = self.peers.get_mut(&id) else {
             return;
         };
@@ -318,15 +346,18 @@ impl Loop {
             .copied()
             .and_then(|cid| p.pc.data_channel(cid))
         {
+            // validated as UTF-8 in Server::send
+            Some(mut dc) if is_string => dc
+                .send_text(Instant::now(), String::from_utf8(data).unwrap_or_default())
+                .map_err(|e| e.to_string()),
             Some(mut dc) => dc
                 .send(Instant::now(), BytesMut::from(&data[..]))
                 .map_err(|e| e.to_string()),
-            None => Err(format!("channel {label} not open")),
+            None => Err("channel not open".to_string()),
         };
-        p.shared.pending_cmd.fetch_sub(len, Ordering::Relaxed);
-        if let Err(e) = res {
-            self.out
-                .push(Event::error(id, format!("send on {label}: {e}")));
+        p.shared.pending_cmd.fetch_sub(len, Ordering::AcqRel);
+        if let Some(msg) = gate::record_send(&p.shared, label, res) {
+            self.out.push(Event::error(id, msg));
         }
         self.dirty.insert(id);
     }
@@ -390,14 +421,12 @@ impl Loop {
         if stats_due {
             self.last_stats = now;
         }
-        for p in self.peers.values_mut() {
+        for (&id, p) in self.peers.iter_mut() {
             let sh = &p.shared;
             if self.pacer_on {
-                let add = p.pacer.refill(now);
-                let cap = p.pacer.burst_cap(1200) as i64;
-                let t = sh.tokens.fetch_add(add as i64, Ordering::Relaxed) + add as i64;
-                if t > cap {
-                    sh.tokens.store(cap, Ordering::Relaxed);
+                gate::refill(sh, &mut p.pacer, now);
+                if let Some(on) = p.overload.update(sh, now) {
+                    self.out.push(Event::overload(id, on));
                 }
             }
             if !stats_due {
@@ -464,7 +493,7 @@ impl Loop {
                     _ => {}
                 },
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(cid)) => {
-                    if let Some(label) = p.learn(cid) {
+                    if let Some(label) = p.learn(cid, &self.priorities) {
                         self.out.push(Event::channel("channelopen", id, label));
                     }
                 }
@@ -495,9 +524,10 @@ impl Loop {
         }
         while let Some(TaggedRTCMessage { message, .. }) = p.pc.poll_read() {
             if let RTCMessage::DataChannelMessage(cid, m) = message
-                && let Some(label) = p.learn(cid)
+                && let Some(label) = p.learn(cid, &self.priorities)
             {
-                self.out.push(Event::message(id, label, m.data.to_vec()));
+                self.out
+                    .push(Event::message(id, label, m.data.to_vec(), m.is_string));
             }
         }
         let mut out = 0usize;
@@ -506,7 +536,7 @@ impl Loop {
                 out += dc.outstanding_bytes();
             }
         }
-        p.shared.stack_outstanding.store(out, Ordering::Relaxed);
+        p.shared.stack_outstanding.store(out, Ordering::Release);
         flush_writes(&self.sock, self.v6, id, &mut p.pc);
 
         let d = p.pc.poll_timeout();

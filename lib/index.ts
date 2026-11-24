@@ -8,6 +8,8 @@ export interface Message {
   peer: number;
   label: string;
   data: Buffer;
+  /** The sender sent a string (decode `data` as UTF-8), not binary. */
+  isString: boolean;
 }
 
 export interface SessionDescription {
@@ -27,8 +29,11 @@ export interface SendOptions {
   exempt?: boolean;
 }
 
-/** Why a peer closed: `local` (closePeer/close), `closed` (remote closed), `failed` (ICE/DTLS failed). */
-export type CloseReason = 'local' | 'closed' | 'failed' | (string & {});
+/**
+ * Why a peer closed: `local` (closePeer/close), `closed` (remote closed), `failed` (ICE/DTLS failed),
+ * `reliable-overflow` (a reliable send would have pushed its queue past `reliableLimit`).
+ */
+export type CloseReason = 'local' | 'closed' | 'failed' | 'reliable-overflow' | (string & {});
 
 export class PeerError extends Error {
   readonly peer: number;
@@ -49,6 +54,11 @@ interface Events {
   close: [{ peer: number; reason: CloseReason }];
   /** Something failed for one peer (e.g. rtc refused a send). Only emitted if a listener exists. */
   error: [PeerError];
+  /**
+   * `overloaded: true` once the pacer budget stayed negative for `overloadMs` (reliable load alone
+   * fills the link, unreliable gets nothing): shed reliable load or kick. `false` when it recovers.
+   */
+  overload: [{ peer: number; overloaded: boolean }];
 }
 
 /**
@@ -82,12 +92,19 @@ export class Server extends EventEmitter<Events> {
   }
 
   /**
-   * Send on a channel by label. Returns false when an unreliable send was dropped by
-   * the backpressure gate or the pacer: the state is still owed, send fresh state next tick.
+   * Send on a channel by label. A string is sent as a WebRTC string message (the browser
+   * gets a string), bytes as binary. Returns false when an unreliable send was dropped by
+   * the backpressure gate or the pacer (the state is still owed, send fresh state next
+   * tick), or when a reliable send hit `reliableLimit` (the peer is then closed, `close`
+   * reason `reliable-overflow`). Throws if the peer is unknown or closed, the channel isn't
+   * open, or the message is larger than the negotiated max message size.
    */
-  send(peer: number, label: string, data: Buffer | Uint8Array, opts: SendOptions = {}): boolean {
-    const buf = Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
-    return this.native.send(peer, label, buf, opts.exempt ?? false);
+  send(peer: number, label: string, data: string | Buffer | Uint8Array, opts: SendOptions = {}): boolean {
+    const isString = typeof data === 'string';
+    const buf = isString
+      ? Buffer.from(data, 'utf8')
+      : Buffer.isBuffer(data) ? data : Buffer.from(data.buffer, data.byteOffset, data.byteLength);
+    return this.native.send(peer, label, buf, opts.exempt ?? false, isString);
   }
 
   /** Bytes the pacer allows right now (can be negative after reliable sends). */
@@ -121,7 +138,7 @@ export class Server extends EventEmitter<Events> {
   private dispatch(e: NativeEvent): void {
     switch (e.kind) {
       case 'message':
-        this.emit('message', { peer: e.peer, label: e.label!, data: e.data! });
+        this.emit('message', { peer: e.peer, label: e.label!, data: e.data!, isString: e.isString ?? false });
         break;
       case 'open':
         this.emit('open', { peer: e.peer });
@@ -131,6 +148,9 @@ export class Server extends EventEmitter<Events> {
         break;
       case 'close':
         this.emit('close', { peer: e.peer, reason: e.reason ?? 'closed' });
+        break;
+      case 'overload':
+        this.emit('overload', { peer: e.peer, overloaded: e.reason === 'start' });
         break;
       case 'error':
         if (this.listenerCount('error') > 0) this.emit('error', new PeerError(e.peer, e.reason ?? 'error'));
