@@ -1311,6 +1311,7 @@ dependencies = [
 [[package]]
 name = "rtc"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "hex",
@@ -1346,6 +1347,7 @@ dependencies = [
 [[package]]
 name = "rtc-crypto"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "aes",
  "ccm",
@@ -1363,6 +1365,7 @@ dependencies = [
 [[package]]
 name = "rtc-datachannel"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "log",
@@ -1374,6 +1377,7 @@ dependencies = [
 [[package]]
 name = "rtc-dtls"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytecheck",
  "byteorder",
@@ -1392,6 +1396,7 @@ dependencies = [
 [[package]]
 name = "rtc-ice"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "crc",
@@ -1409,6 +1414,7 @@ dependencies = [
 [[package]]
 name = "rtc-interceptor"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "log",
  "rand",
@@ -1421,6 +1427,7 @@ dependencies = [
 [[package]]
 name = "rtc-mdns"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "log",
@@ -1432,6 +1439,7 @@ dependencies = [
 [[package]]
 name = "rtc-media"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1444,6 +1452,7 @@ dependencies = [
 [[package]]
 name = "rtc-rtcp"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "rtc-shared",
@@ -1452,6 +1461,7 @@ dependencies = [
 [[package]]
 name = "rtc-rtp"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "memchr",
@@ -1463,6 +1473,7 @@ dependencies = [
 [[package]]
 name = "rtc-sctp"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "crc32c",
@@ -1477,6 +1488,7 @@ dependencies = [
 [[package]]
 name = "rtc-sdp"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "rand",
  "rtc-shared",
@@ -1486,6 +1498,7 @@ dependencies = [
 [[package]]
 name = "rtc-shared"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bitflags 1.3.2",
  "bytes",
@@ -1501,6 +1514,7 @@ dependencies = [
 [[package]]
 name = "rtc-srtp"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "byteorder",
  "bytes",
@@ -1513,6 +1527,7 @@ dependencies = [
 [[package]]
 name = "rtc-stun"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -1528,6 +1543,7 @@ dependencies = [
 [[package]]
 name = "rtc-turn"
 version = "0.21.1"
+source = "git+https://github.com/stasadance/rtc?branch=lagless#caad072dce864553d3ed3b3134655947ae414fea"
 dependencies = [
  "bytes",
  "log",

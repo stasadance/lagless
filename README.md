@@ -28,32 +28,28 @@ Headless Chromium client, 200 ms RTT, random loss both ways, 40 KB/s offered
 node-datachannel rows are from the first run of the harness, which sent unreliable before reliable
 each tick; the lagless row sends reliable first. At 2% loss lagless is 210 / 335 ms ping and 387 / 837 ms reliable age; at 0% it is 207 / 208 ms.
 The pacer runs the link slightly under capacity (about 5–10% less goodput than RACK alone) to keep
-the queue near zero. Raw data and the harness are in [`bench/`](bench/).
+the queue near zero. Write-ups and the harness are in [`bench/`](bench/).
 
 ## Usage
 
-```js
-const { Server } = require('lagless');
+```ts
+import { Server } from 'lagless';
 
 const server = new Server(); // defaults: unreliableLimit 65536, rack true, pacer true, bindAddress '0.0.0.0'
 
 // signaling is yours: get the browser's offer (gather complete, non-trickle) over HTTP/WebSocket
-const { peer, answer } = server.acceptOffer(offerJson, PUBLIC_IP, 0);
-// -> send `answer` (JSON {type, sdp}) back to the browser
+const { peer, answer } = server.accept(offer, PUBLIC_IP);
+// -> send `answer` ({ type, sdp }) back to the browser
 
-setInterval(() => {
-  for (const m of server.drain()) handle(m.peer, m.label, m.data); // all inbound, one call
-}, 1);
+server.on('message', ({ peer, label, data }) => handle(peer, label, data));
 
 function tick() {
-  server.send(peer, 'reliable', events, false);        // reliable: always queued
+  server.send(peer, 'reliable', events);            // reliable: always queued
   for (const snap of snapshots) {
-    if (!server.send(peer, 'state', snap, false)) {    // unreliable: false = dropped, keep it owed
-      break;                                           // next tick sends fresher absolute state
-    }
-  }
+    if (!server.send(peer, 'state', snap)) break;   // unreliable: false = dropped, keep it owed;
+  }                                                 // next tick sends fresher absolute state
 }
-// latency probes: server.send(peer, 'state', pong, true) bypasses gate and pacer
+// latency probes: server.send(peer, 'state', pong, { exempt: true }) bypasses gate and pacer
 ```
 
 Browser side: `pc.createDataChannel('state', { ordered: false, maxRetransmits: 0 })` and
@@ -63,13 +59,14 @@ Browser side: `pc.createDataChannel('state', { ordered: false, maxRetransmits: 0
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` |
-| `acceptOffer(offerJson, advertiseIp, advertisePort)` | → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
-| `send(peer, label, buf, exempt)` | → `boolean`. `false` only for unreliable channels (gate or budget). Throws if the channel isn't open |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
+| `accept(offer, advertiseIp, advertisePort = 0)` | `offer` is `{ type, sdp }` or its JSON. → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
+| `send(peer, label, data, { exempt }?)` | → `boolean`. `false` only for unreliable channels (gate or budget). Throws if the channel isn't open |
+| `on('message', ({ peer, label, data }) => …)` | every inbound message, all peers |
 | `budget(peer)` | bytes the pacer allows right now (negative after a reliable burst) |
-| `drain()` | `[{ peer, label, data }]` since the last call |
 | `stats(peer)` | `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts` |
-| `close(peer)`, `closeAll()` | |
+| `closePeer(peer)`, `close()` | |
+| `native` | the raw Rust binding |
 
 Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
 
@@ -84,22 +81,36 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 
 ```sh
 pnpm install
-pnpm build        # napi build --platform --release
+pnpm build        # native module (napi) + TypeScript wrapper (dist/)
+pnpm typecheck    # lib, tests and bench
 pnpm test         # loopback e2e against node-datachannel
-pnpm test:rust    # pacer unit tests + 214 vendored rtc-sctp tests
+pnpm test:rust    # pacer unit tests
 ```
 
-The patched `rtc` stack is vendored in [`vendor/`](vendor/README.md).
+### rtc fork
+
+The WebRTC stack is [stasadance/rtc](https://github.com/stasadance/rtc/tree/lagless), branch `lagless`:
+upstream [webrtc-rs/rtc](https://github.com/webrtc-rs/rtc) v0.21.1 (`0fbcaa7`) plus 4 commits.
+Its rtc-sctp tests (214) run there: `cargo test -p rtc-sctp`.
+
+| commit | what |
+|---|---|
+| 1 | rtc-sctp tests bind IPv4 loopback (CI containers without IPv6) |
+| 2 | RACK-TLP loss detection (RFC 8985) in rtc-sctp, behind `TransportConfig::with_rack` / `SettingEngine::with_sctp_rack`; configurable RTO min |
+| 3 | RACK: losses of chunks that will not be retransmitted (unreliable, retries or lifetime exhausted) do not cut cwnd |
+| 4 | `Association::transport_stats()` / `RTCPeerConnection::sctp_transport_stats()`: srtt, min RTT, cwnd, in-flight/pending/acked bytes, RACK and T3 counters |
 
 ## Release
 
 Bump the version and push the tag. CI builds all five platforms and publishes to npm with [trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token). Each of the 6 packages (`lagless` + `lagless-<platform>`) needs a trusted publisher on npmjs.com pointing at `stasadance/lagless`, workflow `release.yml`.
 
 ```sh
-pnpm version patch   # also bumps npm/* platform packages
+pnpm version patch
 git push --follow-tags
 ```
 
+The per-platform packages (`npm/`) are generated in the release job.
+
 ## License
 
-MIT. The vendored `rtc` stack in `vendor/` keeps its upstream MIT OR Apache-2.0 license.
+MIT. The `rtc` dependency is MIT OR Apache-2.0 (upstream).

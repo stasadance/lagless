@@ -2,8 +2,8 @@
   "name": "lagless",
   "version": "0.1.0",
   "description": "Low-latency WebRTC data channels for real-time games. Rust (webrtc-rs) native module for Node.js.",
-  "main": "index.js",
-  "types": "index.d.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -23,9 +23,9 @@
     "node": ">= 18"
   },
   "files": [
-    "index.js",
-    "index.d.ts",
-    "*.node"
+    "dist",
+    "binding.js",
+    "binding.d.ts"
   ],
   "napi": {
     "binaryName": "lagless",
@@ -38,16 +38,20 @@
     ]
   },
   "scripts": {
-    "build": "napi build --platform --release",
-    "build:debug": "napi build --platform",
-    "test": "node --test test/*.test.js",
-    "test:rust": "cargo test --release && cargo test --manifest-path vendor/rtc/rtc-sctp/Cargo.toml",
-    "bench": "node bench/run.js",
-    "version": "napi version"
+    "build": "pnpm build:native && pnpm build:ts",
+    "test": "node --test test/*.test.mts",
+    "test:rust": "cargo test --release",
+    "bench": "node bench/run.mts",
+    "build:native": "napi build --platform --release --js binding.js --dts binding.d.ts",
+    "build:ts": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {
     "@napi-rs/cli": "3.11.0",
-    "node-datachannel": "0.33.6"
+    "@types/node": "22.20.5",
+    "node-datachannel": "0.33.6",
+    "playwright": "1.65.1",
+    "typescript": "7.0.2"
   },
   "packageManager": "pnpm@10.28.0",
   "pnpm": {

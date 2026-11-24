@@ -7,7 +7,7 @@ OUT=${1:-results.jsonl}; shift || true
 KINDS=${*:-"rtc+rack+pace rtc ndc"}
 : > "$OUT"
 for loss in ${LOSSES:-0 2 5}; do for seed in ${SEEDS:-1 2 3}; do for k in $KINDS; do
-  timeout 90 node run.js "$k" "${GATE:-1}" "$loss" "$seed" "${DUR:-45}" "${RTT:-200}" 2>/dev/null | tail -1 >> "$OUT" \
+  timeout 90 node run.mts "$k" "${GATE:-1}" "$loss" "$seed" "${DUR:-45}" "${RTT:-200}" 2>/dev/null | tail -1 >> "$OUT" \
     || echo "{\"error\":\"timeout\",\"cfg\":\"$k $loss $seed\"}" >> "$OUT"
 done; done; done
-node summarize.js "$OUT"
+node summarize.mts "$OUT"
