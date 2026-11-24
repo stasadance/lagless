@@ -552,6 +552,9 @@ impl Loop {
         }
         p.shared.stack_outstanding.store(out, Ordering::Release);
         flush_writes(&self.sock, self.v6, id, &mut p.pc);
+        if let Some(ts) = p.pc.sctp_transport_stats() {
+            p.shared.stack_unsent.store(ts.pending_bytes, Ordering::Release);
+        }
 
         let d = p.pc.poll_timeout();
         if d != p.deadline {

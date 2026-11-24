@@ -96,7 +96,7 @@ client against coturn.
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any), `pacerStartRate` (B/s, 65536), `pacerMinRate` (B/s, 8192), `pacerBurstMs` (100), `egressRate` (B/s, server-wide cap, off) |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off; unreliable is also dropped while SCTP has > 2400 B unsent), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress` (default `'0.0.0.0'`, `'::'` = dual-stack), `port` (default 0 = any), `pacerStartRate` (B/s, 65536), `pacerMinRate` (B/s, 8192), `pacerBurstMs` (100), `egressRate` (B/s, server-wide cap, off) |
 | `localPort` | the UDP port all peers share |
 | `accept(offer, advertiseIp, advertisePort = 0)` | async. `offer` is `{ type, sdp }` or its JSON; `advertiseIp` is one IP or an array (one host candidate each, IPv4 and/or IPv6). → `Promise<{ peer, answer, localPort }>`. `advertisePort` 0 = `localPort` |
 | `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate, budget or egress cap), or reliable hit `reliableLimit` (peer closed, reason `reliable-overflow`). Throws if the peer is gone, the channel isn't open or `data` exceeds the max message size |

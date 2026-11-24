@@ -42,7 +42,7 @@ Unreliable messages should carry absolute state (full position, not deltas) so a
 
 | option | default | meaning |
 |---|---|---|
-| `unreliableLimit` | `65536` | Drop an unreliable send when bytes SCTP hasn't released yet (pending + in flight) plus its length would exceed this. `0` disables the gate. |
+| `unreliableLimit` | `65536` | Drop an unreliable send when bytes SCTP hasn't released yet (pending + in flight) plus its length would exceed this. It also drops unreliable while SCTP holds more than 2400 B it can't send yet (cwnd full), so unreliable never queues ahead of reliable. `0` disables the gate. |
 | `rack` | `true` | RACK-TLP loss detection on the SCTP association |
 | `pacer` | `true` | Per-peer send pacer: unreliable sends need budget tokens |
 | `rtoMin` | `1000` | SCTP RTO lower bound in ms (RFC 9260) |
