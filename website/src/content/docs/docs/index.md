@@ -26,6 +26,6 @@ Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (gli
 ## Limits (v1)
 
 - One worker thread and one UDP socket per peer. No single-port mux yet.
-- Host candidate only (no STUN/TURN gathering on the server) and non-trickle offers.
+- Host candidate only (no STUN/TURN gathering on the server) and non-trickle offers. Players behind strict NAT or UDP-blocking networks connect through a TURN server set in the browser's `iceServers`; the server needs nothing extra.
 - lagless controls the **server to client** direction, which is where heavy snapshot traffic goes. The **client to server** direction is the browser's own SCTP stack (Chrome's dcSCTP), which no server library can change.
 - Tested on Linux x64. Prebuilt targets: Linux x64/arm64, macOS x64/arm64, Windows x64.
