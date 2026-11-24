@@ -20,6 +20,9 @@ use std::time::{Duration, Instant};
 pub const INTERVAL: Duration = Duration::from_millis(50);
 /// delivery samples span at least one RTT (SACKs arrive in bursts) and this floor
 const MIN_SAMPLE: Duration = Duration::from_millis(100);
+/// ...but no longer than this, or a fast-growing queue (srtt rising faster than
+/// wall time) would keep the controller from ever running
+const MAX_SAMPLE: Duration = Duration::from_millis(500);
 const WINDOW: usize = 5; // ~5 RTTs max filter for probing
 pub const DEFAULT_START_RATE: f64 = 64.0 * 1024.0;
 pub const DEFAULT_FLOOR_RATE: f64 = 8.0 * 1024.0;
@@ -31,6 +34,10 @@ const PROBE_GAIN: f64 = 1.15;
 const QUEUE_MARGIN: Duration = Duration::from_millis(40);
 /// network queue (srtt - min_rtt) that triggers draining
 const NET_QUEUE_LIMIT: Duration = Duration::from_millis(60);
+/// drain samples after which an RTT that did not come down counts as a path change
+const DRAIN_PROBE: u32 = 2;
+/// how much srtt must fall during those samples for the queue to count as ours
+const DRAIN_EFFECT: Duration = Duration::from_millis(10);
 
 #[derive(Debug, Clone, Copy)]
 pub struct Config {
@@ -76,6 +83,10 @@ pub struct Pacer {
     win_start: Instant,
     last_refill: Instant,
     own_min_rtt: Option<Duration>,
+    /// raised base RTT after a path change (see `update`); follows srtt down
+    rtt_floor: Option<Duration>,
+    /// srtt when the current drain began, and drain samples since
+    drain_from: Option<(Duration, u32)>,
 }
 
 impl Pacer {
@@ -90,6 +101,8 @@ impl Pacer {
             win_start: now,
             last_refill: now,
             own_min_rtt: None,
+            rtt_floor: None,
+            drain_from: None,
         }
     }
 
@@ -111,7 +124,7 @@ impl Pacer {
     /// Run the controller if an interval elapsed. Returns true when it ran.
     pub fn update(&mut self, now: Instant, s: &Signals) -> bool {
         let dt = now.saturating_duration_since(self.win_start);
-        if dt < MIN_SAMPLE.max(s.srtt) {
+        if dt < MIN_SAMPLE.max(s.srtt.min(MAX_SAMPLE)) {
             return false;
         }
         self.win_start = now;
@@ -123,7 +136,13 @@ impl Pacer {
         if s.srtt > Duration::ZERO {
             self.own_min_rtt = Some(self.own_min_rtt.map_or(s.srtt, |m| m.min(s.srtt)));
         }
-        let min_rtt = s.min_rtt.or(self.own_min_rtt).unwrap_or(s.srtt);
+        if let Some(f) = self.rtt_floor {
+            if s.srtt > Duration::ZERO && s.srtt < f {
+                self.rtt_floor = Some(s.srtt);
+            }
+        }
+        let base_rtt = s.min_rtt.or(self.own_min_rtt).unwrap_or(s.srtt);
+        let min_rtt = self.rtt_floor.map_or(base_rtt, |f| f.max(base_rtt));
         let mtu = s.mtu.max(1200) as f64;
         let target_for = |rate: f64| rate * (min_rtt + QUEUE_MARGIN).as_secs_f64() + 2.0 * mtu;
         let net_queue = s.srtt.saturating_sub(min_rtt);
@@ -143,6 +162,28 @@ impl Pacer {
             return true;
         }
         self.draining = (s.outstanding as f64) > target_for(max_d) || net_queue > NET_QUEUE_LIMIT;
+        // A queue we built drains when we send below the delivery rate, so srtt falls.
+        // If srtt did not fall after a few drain samples, the path RTT went up (mobile,
+        // route change): take the current srtt as the new base instead of starving.
+        if self.draining {
+            let (from, n) = self.drain_from.get_or_insert((s.srtt, 0));
+            *n += 1;
+            if *n > DRAIN_PROBE {
+                if s.srtt + DRAIN_EFFECT >= *from {
+                    self.rtt_floor = Some(s.srtt);
+                    self.drain_from = None;
+                    // re-check against the new base; a sender-side queue still drains
+                    let min_rtt = s.srtt.max(base_rtt);
+                    let target = max_d * (min_rtt + QUEUE_MARGIN).as_secs_f64() + 2.0 * mtu;
+                    self.draining = (s.outstanding as f64) > target;
+                } else {
+                    // it is ours and still draining: measure the next stretch
+                    self.drain_from = Some((s.srtt, 1));
+                }
+            }
+        } else {
+            self.drain_from = None;
+        }
         // drain below what the link just delivered; probe above the recent best
         self.rate = if self.draining { sample * DRAIN_GAIN } else { max_d * PROBE_GAIN }.max(self.cfg.floor_rate);
         true
@@ -243,5 +284,76 @@ mod tests {
         let back = trace[9000..9500].iter().sum::<f64>() / 0.5;
         println!("goodput 0-500 ms after resume {back:.0} (cap {cap})");
         assert!(back > 0.8 * cap, "slow recovery: {back}");
+    }
+
+    /// Fluid link with the queue in the network (bufferbloat): srtt sees it. `extra_ms(t)`
+    /// adds path delay that has nothing to do with our sending (mobile RTT swing).
+    /// Greedy app. Returns (avg self-induced queue delay, goodput, fraction of samples draining).
+    fn sim_net(capacity: f64, base_rtt_ms: f64, secs: u64, extra_ms: impl Fn(f64) -> f64) -> (f64, f64, f64) {
+        let t0 = Instant::now();
+        let mut p = Pacer::new(t0, Config::default());
+        let (mut tokens, mut queue, mut acked) = (0.0f64, 0.0f64, 0.0f64);
+        let mut now = t0;
+        let (mut delays, mut rates) = (vec![], vec![]);
+        let (mut drains, mut updates) = (0u32, 0u32);
+        let mut limited = false;
+        for i in 0..secs * 1000 {
+            now += Duration::from_millis(1);
+            tokens = (tokens + p.refill(now)).min(p.burst_cap(1200));
+            if i % 40 == 0 && tokens > 0.0 {
+                queue += tokens;
+                tokens = 0.0;
+                limited = true;
+            }
+            let drained = (capacity * 0.001).min(queue);
+            queue -= drained;
+            acked += drained;
+            let path = base_rtt_ms + extra_ms(i as f64 / 1000.0);
+            let qms = queue / capacity * 1000.0;
+            let s = Signals {
+                acked_total: acked as u64,
+                outstanding: queue as usize + (p.rate.min(capacity) * path / 1000.0) as usize,
+                srtt: Duration::from_secs_f64((path + qms) / 1000.0),
+                min_rtt: Some(Duration::from_millis(base_rtt_ms as u64)),
+                mtu: 1200,
+                budget_limited: limited,
+                cwnd_limited: false,
+            };
+            if p.update(now, &s) {
+                limited = false;
+                if i > 3000 {
+                    updates += 1;
+                    drains += p.draining as u32;
+                }
+            }
+            if i > 3000 {
+                delays.push(qms / 1000.0);
+                rates.push(drained * 1000.0);
+            }
+        }
+        let n = delays.len() as f64;
+        (delays.iter().sum::<f64>() / n, rates.iter().sum::<f64>() / n, drains as f64 / updates.max(1) as f64)
+    }
+
+    #[test]
+    fn bufferbloat_queue_drains() {
+        let cap = 32.0 * 1024.0;
+        let (q, g, d) = sim_net(cap, 200.0, 30, |_| 0.0);
+        println!("bloat: queue {q:.3}s goodput {g:.0} drain {d:.2}");
+        assert!(q < 0.15, "network queue {q}s");
+        assert!(g > 0.8 * cap, "goodput {g}");
+    }
+
+    #[test]
+    fn rtt_swing_is_not_read_as_queue() {
+        // one-way +200 ms over 20 s periods (RTT 200 -> 600 ms), plenty of capacity
+        let cap = 64.0 * 1024.0;
+        let swing = |t: f64| 400.0 * (0.5 - 0.5 * (2.0 * std::f64::consts::PI * t / 20.0).cos());
+        let (q, g, d) = sim_net(cap, 200.0, 60, swing);
+        println!("swing: queue {q:.3}s goodput {g:.0} drain {d:.2}");
+        assert!(q < 0.15, "network queue {q}s");
+        // without the path-change check this starves at the floor (~15 KB/s)
+        assert!(g > 0.8 * cap, "goodput {g}");
+        assert!(d < 0.6, "draining {d:.2} of samples");
     }
 }

@@ -40,12 +40,21 @@ fn reserve(s: &PeerShared, len: usize, fits: impl Fn(usize) -> bool) -> bool {
         .is_ok()
 }
 
+/// Unsent bytes SCTP may hold (cwnd full) before unreliable sends are dropped. More
+/// unreliable would only wait for cwnd, ahead of the reliable data queued behind it.
+pub(crate) const UNSENT_LIMIT: usize = 2400;
+
 /// Decide whether a send goes. On `Queued` the caller must hand the message to the
 /// worker, which releases `len` from `pending_cmd` once SCTP has it.
 pub(crate) fn admit(s: &PeerShared, lim: Limits, unreliable: bool, exempt: bool, len: usize) -> Verdict {
     let out = s.stack_outstanding.load(Acquire);
     if unreliable && !exempt {
-        if !reserve(s, len, |p| lim.unreliable == 0 || out + p + len <= lim.unreliable) {
+        let unsent = s.stack_unsent.load(Acquire);
+        let fits = |p: usize| {
+            lim.unreliable == 0
+                || (out + p + len <= lim.unreliable && unsent + p + len <= UNSENT_LIMIT.max(len))
+        };
+        if !reserve(s, len, fits) {
             s.budget_limited.store(true, Relaxed);
             s.dropped.fetch_add(1, Relaxed);
             return Verdict::Dropped;

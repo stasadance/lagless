@@ -38,6 +38,7 @@ In deterministic sims at 100 ms RTT, tail loss recovers in 605 ms vs 1.2 s, and 
 - **Delivery rate** is sampled from acked bytes over windows of at least one RTT, with a max filter over the last ~5 samples.
 - **App-limited samples.** If the app sent less than the budget allowed and no queue built, the sample measures the app, not the link. Like BBR, it only enters the max filter when it raises it, so a quiet stretch doesn't ratchet the rate down and full sends get the old rate back at once.
 - **Drain vs probe.** If outstanding bytes exceed rate × (min RTT + 40 ms) + 2 MTU, or the network queue (srtt − min RTT) is over 60 ms, the rate drops to 0.75 × the last sample. Otherwise it's 1.15 × the recent max. Floor 8 KB/s, start 64 KB/s (`pacerMinRate`, `pacerStartRate`).
+- **Path RTT changes.** If two drain samples don't bring srtt down, the RTT rise isn't a queue we built (mobile RTT swing, route change). The pacer takes the current srtt as its new base instead of draining to the floor.
 - **Token bucket** (0.1 s deep, `pacerBurstMs`) per peer. Reliable sends always go and spend tokens. Unreliable sends need tokens or `send()` returns `false`. Pongs are exempt.
 - **Server-wide egress cap** (`egressRate`, off by default). One more token bucket shared by all peers, for a host uplink that many peers share. Same rules: reliable always goes, unreliable needs tokens. It isn't fair across peers: whoever sends first in a tick gets the budget, so rotate the send order if that matters.
 

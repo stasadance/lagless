@@ -33,6 +33,8 @@ pub(crate) type Registry = Arc<Mutex<HashMap<u32, Arc<PeerShared>>>>;
 pub(crate) struct PeerShared {
     /// bytes SCTP has not released yet (sum of outstanding_bytes over channels)
     stack_outstanding: AtomicUsize,
+    /// bytes SCTP holds but has not sent yet (cwnd full), refreshed every loop pass
+    stack_unsent: AtomicUsize,
     /// bytes accepted by send() but not yet handed to the worker loop
     pending_cmd: AtomicUsize,
     dropped: AtomicU64,
@@ -72,7 +74,9 @@ pub(crate) struct PeerShared {
 #[napi(object)]
 pub struct ServerOptions {
     /// Drop an unreliable send when bytes not yet released by SCTP + its length
-    /// would exceed this. 0 disables the gate. Default 65536.
+    /// would exceed this. 0 disables the gate. Default 65536. The gate also drops
+    /// unreliable while SCTP holds more than 2400 B it cannot send yet (cwnd full),
+    /// so unreliable never sits in SCTP's queue ahead of reliable.
     ///
     /// A channel counts as unreliable when it was opened with `maxRetransmits` or
     /// `maxPacketLifeTime` set (any value, so `maxRetransmits: 3` is gated too).
