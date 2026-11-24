@@ -7,6 +7,7 @@
 //! budget, so stale game state is dropped instead of queued.
 
 mod event_loop;
+mod gate;
 mod pacer;
 mod stun;
 
@@ -54,13 +55,37 @@ pub(crate) struct PeerShared {
     rack_lost: AtomicU64,
     rack_probes: AtomicU64,
     t3_timeouts: AtomicU64,
+    // send outcomes (see gate.rs)
+    reliable_overflows: AtomicU64,
+    send_errors: AtomicU64,
+    overloaded: AtomicBool,
+    overloads: AtomicU64,
+    /// negotiated SCTP max message size, 0 until known
+    max_message_size: AtomicUsize,
 }
 
 #[napi(object)]
 pub struct ServerOptions {
     /// Drop an unreliable send when bytes not yet released by SCTP + its length
     /// would exceed this. 0 disables the gate. Default 65536.
+    ///
+    /// A channel counts as unreliable when it was opened with `maxRetransmits` or
+    /// `maxPacketLifeTime` set (any value, so `maxRetransmits: 3` is gated too).
+    /// Only those channels are gated and paced; every other channel is reliable.
     pub unreliable_limit: Option<u32>,
+    /// Reliable byte cap: when a reliable send would push the bytes queued for a peer
+    /// (all channels, not yet released by SCTP) past this, the peer is closed with
+    /// reason "reliable-overflow" and send() returns false. 0 = unbounded. Default 4 MiB.
+    pub reliable_limit: Option<u32>,
+    /// Reliable-overload signal: an `overload` event (and `stats().overloaded`) once the
+    /// pacer budget has stayed below zero for this many ms (reliable load alone fills the
+    /// link and unreliable gets nothing). 0 disables. Default 1000.
+    pub overload_ms: Option<u32>,
+    /// SCTP send weight per channel label, in data channel priority units
+    /// (128 very-low, 256 low = default, 512 medium, 1024 high). Setting any switches the
+    /// association to weighted fair queueing: each channel gets a share of the bytes SCTP
+    /// sends in proportion to its weight, so a 1024 pong channel jumps a 256 state queue.
+    pub channel_priority: Option<HashMap<String, u32>>,
     /// RACK-TLP loss detection on the SCTP association. Default true.
     pub rack: Option<bool>,
     /// SCTP RTO lower bound in ms. Default 1000 (RFC 9260).
@@ -75,6 +100,8 @@ pub struct ServerOptions {
 }
 
 const DEFAULT_UNRELIABLE_LIMIT: u32 = 64 * 1024;
+const DEFAULT_RELIABLE_LIMIT: u32 = 4 * 1024 * 1024;
+const DEFAULT_OVERLOAD_MS: u32 = 1000;
 
 #[napi(object)]
 pub struct Accepted {
@@ -83,15 +110,18 @@ pub struct Accepted {
     pub local_port: u32,
 }
 
-/// One item of a batch pushed to JS. `kind` is message | open | channelopen | close | error.
+/// One item of a batch pushed to JS. `kind` is message | open | channelopen | close | error | overload.
 #[napi(object)]
 pub struct Event {
     pub kind: String,
     pub peer: u32,
     pub label: Option<String>,
     pub data: Option<Buffer>,
-    /// close: local | closed | failed. error: what failed.
+    /// close: local | closed | failed | reliable-overflow. error: what failed.
+    /// overload: start | end.
     pub reason: Option<String>,
+    /// message: sent as a string (PPID 51/56) rather than binary
+    pub is_string: Option<bool>,
 }
 
 impl Event {
@@ -102,6 +132,7 @@ impl Event {
             label: None,
             data: None,
             reason: None,
+            is_string: None,
         }
     }
     pub(crate) fn channel(kind: &str, peer: u32, label: String) -> Self {
@@ -110,9 +141,10 @@ impl Event {
             ..Self::simple(kind, peer)
         }
     }
-    pub(crate) fn message(peer: u32, label: String, data: Vec<u8>) -> Self {
+    pub(crate) fn message(peer: u32, label: String, data: Vec<u8>, is_string: bool) -> Self {
         Event {
             data: Some(data.into()),
+            is_string: Some(is_string),
             ..Self::channel("message", peer, label)
         }
     }
@@ -126,6 +158,12 @@ impl Event {
         Event {
             reason: Some(reason),
             ..Self::simple("error", peer)
+        }
+    }
+    pub(crate) fn overload(peer: u32, on: bool) -> Self {
+        Event {
+            reason: Some(if on { "start" } else { "end" }.into()),
+            ..Self::simple("overload", peer)
         }
     }
 }
@@ -150,14 +188,20 @@ pub struct PeerStats {
     pub rack_lost: f64,
     pub rack_probes: f64,
     pub t3_timeouts: f64,
+    /// messages rtc refused after send() returned true (each also emits `error`)
+    pub send_errors: f64,
+    /// pacer budget has been negative for `overloadMs`: shed reliable load or kick
+    pub overloaded: bool,
+    /// times `overloaded` turned true
+    pub overloads: f64,
 }
 
 #[napi]
 pub struct Server {
-    limit: usize,
+    limits: gate::Limits,
+    wfq: bool,
     rack: bool,
     rto_min: Option<u32>,
-    pacer: bool,
     local_addr: SocketAddr,
     next_id: std::sync::atomic::AtomicU32,
     registry: Registry,
@@ -173,6 +217,9 @@ impl Server {
         let _ = env_logger::try_init();
         let opts = opts.unwrap_or(ServerOptions {
             unreliable_limit: None,
+            reliable_limit: None,
+            overload_ms: None,
+            channel_priority: None,
             rack: None,
             rto_min: None,
             pacer: None,
@@ -192,17 +239,29 @@ impl Server {
         let pacer = opts.pacer.unwrap_or(true);
         let registry: Registry = Arc::default();
         let (tx, rx) = std::sync::mpsc::channel();
-        let (lp, ctl) = event_loop::new(sock, registry.clone(), pacer, tx, rx)
+        let priorities: HashMap<String, u16> = opts
+            .channel_priority
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(l, p)| (l, p.clamp(1, u16::MAX as u32) as u16))
+            .collect();
+        let wfq = !priorities.is_empty();
+        let overload_ms = if pacer { opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS) } else { 0 };
+        let (lp, ctl) = event_loop::new(sock, registry.clone(), pacer, overload_ms, priorities, tx, rx)
             .map_err(|e| Error::from_reason(e.to_string()))?;
         let thread = std::thread::Builder::new()
             .name("lagless".into())
             .spawn(move || lp.run())
             .map_err(|e| Error::from_reason(e.to_string()))?;
         Ok(Server {
-            limit: opts.unreliable_limit.unwrap_or(DEFAULT_UNRELIABLE_LIMIT) as usize,
+            limits: gate::Limits {
+                unreliable: opts.unreliable_limit.unwrap_or(DEFAULT_UNRELIABLE_LIMIT) as usize,
+                reliable: opts.reliable_limit.unwrap_or(DEFAULT_RELIABLE_LIMIT) as usize,
+                pacer,
+            },
+            wfq,
             rack: opts.rack.unwrap_or(true),
             rto_min: opts.rto_min,
-            pacer,
             local_addr,
             next_id: 1.into(),
             registry,
@@ -260,15 +319,30 @@ impl Server {
             port,
             rack: self.rack,
             rto_min: self.rto_min,
+            wfq: self.wfq,
             registry: self.registry.clone(),
             ctl: self.ctl.clone(),
         }))
     }
 
     /// Returns false when an unreliable send was dropped by the backpressure gate
-    /// (caller keeps the state "owed"). `exempt` bypasses the gate (latency probes).
+    /// (caller keeps the state "owed"), or when a reliable send hit the reliable byte
+    /// cap (the peer is then closed: `close` event, reason "reliable-overflow").
+    /// `exempt` bypasses the gate and pacer (latency probes). `is_string` sends `data`
+    /// (UTF-8) as a string message.
+    ///
+    /// Each check-and-reserve is atomic, but the gate reads a snapshot of the SCTP queue
+    /// taken by the loop thread, so limits are approximate by up to one loop pass.
+    /// Call send() for a given Server from one JS thread (it is not shareable anyway).
     #[napi]
-    pub fn send(&self, peer: u32, label: String, data: Buffer, exempt: bool) -> Result<bool> {
+    pub fn send(
+        &self,
+        peer: u32,
+        label: String,
+        data: Buffer,
+        exempt: bool,
+        is_string: Option<bool>,
+    ) -> Result<bool> {
         let s = self
             .registry
             .lock()
@@ -276,38 +350,40 @@ impl Server {
             .get(&peer)
             .cloned()
             .ok_or_else(|| Error::from_reason("no such peer"))?;
+        if s.closed.load(Ordering::Acquire) {
+            return Err(Error::from_reason("peer closed"));
+        }
         let unreliable = match s.channels.lock().unwrap().get(&label) {
             Some(u) => *u,
             None => return Err(Error::from_reason(format!("channel {label} not open"))),
         };
         let len = data.len();
-        if unreliable {
-            if !exempt && self.limit > 0 {
-                let out = s.stack_outstanding.load(Ordering::Relaxed)
-                    + s.pending_cmd.load(Ordering::Relaxed);
-                if out + len > self.limit {
-                    s.dropped.fetch_add(1, Ordering::Relaxed);
-                    return Ok(false);
-                }
-            }
-            if !exempt && self.pacer && s.tokens.load(Ordering::Relaxed) < len as i64 {
-                s.paced_drops.fetch_add(1, Ordering::Relaxed);
-                s.dropped.fetch_add(1, Ordering::Relaxed);
+        let max = s.max_message_size.load(Ordering::Relaxed);
+        if max > 0 && len > max {
+            return Err(Error::from_reason(format!(
+                "message of {len} bytes exceeds max message size {max}"
+            )));
+        }
+        let is_string = is_string.unwrap_or(false);
+        if is_string && std::str::from_utf8(&data).is_err() {
+            return Err(Error::from_reason("string message is not valid UTF-8"));
+        }
+        match gate::admit(&s, self.limits, unreliable, exempt, len) {
+            gate::Verdict::Queued => {}
+            gate::Verdict::Dropped => return Ok(false),
+            gate::Verdict::Overflow => {
+                s.closed.store(true, Ordering::Release);
+                self.ctl.push(Cmd::Kick(peer, "reliable-overflow"));
                 return Ok(false);
             }
-            s.sent_unreliable.fetch_add(1, Ordering::Relaxed);
         }
-        if self.pacer {
-            // reliable always goes, and may push the budget negative
-            s.tokens.fetch_sub(len as i64, Ordering::Relaxed);
-        }
-        s.pending_cmd.fetch_add(len, Ordering::Relaxed);
         if !self.ctl.push(Cmd::Send {
             peer,
             label,
             data: data.to_vec(),
+            is_string,
         }) {
-            s.pending_cmd.fetch_sub(len, Ordering::Relaxed);
+            s.pending_cmd.fetch_sub(len, Ordering::AcqRel);
             return Err(Error::from_reason("server closed"));
         }
         Ok(true)
@@ -346,6 +422,9 @@ impl Server {
             rack_lost: s.rack_lost.load(Ordering::Relaxed) as f64,
             rack_probes: s.rack_probes.load(Ordering::Relaxed) as f64,
             t3_timeouts: s.t3_timeouts.load(Ordering::Relaxed) as f64,
+            send_errors: s.send_errors.load(Ordering::Relaxed) as f64,
+            overloaded: s.overloaded.load(Ordering::Relaxed),
+            overloads: s.overloads.load(Ordering::Relaxed) as f64,
         })
     }
 
@@ -391,6 +470,7 @@ pub struct AcceptTask {
     port: u16,
     rack: bool,
     rto_min: Option<u32>,
+    wfq: bool,
     registry: Registry,
     ctl: Ctl,
 }
@@ -417,7 +497,8 @@ impl AcceptTask {
         let offer: RTCSessionDescription = serde_json::from_str(&self.offer_json)?;
         let mut seb = SettingEngineBuilder::new()
             .with_lite(true)
-            .with_sctp_rack(self.rack);
+            .with_sctp_rack(self.rack)
+            .with_sctp_weighted_fair_queueing(self.wfq);
         if let Some(ms) = self.rto_min {
             seb = seb.with_sctp_rto_min(ms as u64);
         }
