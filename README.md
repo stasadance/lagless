@@ -180,10 +180,12 @@ branch head. Its rtc-sctp tests (215) run there: `cargo test -p rtc-sctp`.
 
 ## Release
 
-Bump `version` in `package.json` and merge to `main`. The release workflow builds all seven targets,
-puts every binary in the one `lagless` package and publishes it to npm with
-[trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token, no tag). A push whose version
-is already on npm publishes nothing.
+Run the `release` workflow by hand on `main` (Actions > release > Run workflow). The version is
+`YY.M.N` (UTC), where `N` is the number of commits on `main` since the month started (e.g. `26.11.12`).
+It builds all seven targets, puts every binary in the one `lagless` package, publishes it to npm with
+[trusted publishing](https://docs.npmjs.com/trusted-publishers) (no token), then tags the commit
+`v<version>` and creates the GitHub release. The version is stamped at publish time; `package.json`
+on `main` is not bumped.
 
 ## License
 
