@@ -82,16 +82,16 @@ const features = [
                         <div class="lane old">
                             <span class="name">classic SCTP</span>
                             <div class="track"><div class="dot" id="d-old"></div></div>
-                            <span class="ms">13.6 s</span>
+                            <span class="ms">12.6 s</span>
                         </div>
                         <div class="lane new">
                             <span class="name">lagless</span>
                             <div class="track"><div class="dot" id="d-new"></div></div>
-                            <span class="ms">209 ms</span>
+                            <span class="ms">214 ms</span>
                         </div>
                     </div>
                     <p class="note">
-                        Ping p50 at 200 ms RTT and 5% loss.{" "}
+                        Ping p50 at 200 ms RTT and 5% loss, server to client (client to server is the browser's own SCTP).{" "}
                         <a href={`${base}/docs/benchmarks/`}>Full setup</a>
                     </p>
                     <div class="btns">

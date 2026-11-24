@@ -35,12 +35,15 @@
       "aarch64-unknown-linux-gnu",
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
-      "x86_64-pc-windows-msvc"
+      "x86_64-pc-windows-msvc",
+      "x86_64-unknown-linux-musl",
+      "aarch64-unknown-linux-musl"
     ]
   },
   "scripts": {
     "build": "pnpm build:native && pnpm build:ts",
     "test": "node --test test/*.test.mts",
+    "test:soak": "node test/soak.mts",
     "test:rust": "cargo test --release",
     "bench": "node bench/run.mts",
     "build:native": "napi build --platform --release --js binding.js --dts binding.d.ts",

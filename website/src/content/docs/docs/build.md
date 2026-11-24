@@ -3,7 +3,7 @@ title: Build from source
 description: "How to build, test and release lagless from source."
 ---
 
-The npm package bundles prebuilt binaries for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. Build from source on other platforms, or to work on lagless itself.
+The npm package bundles prebuilt binaries for Linux x64/arm64 (glibc and musl), macOS x64/arm64 and Windows x64. Build from source on other platforms, or to work on lagless itself.
 
 ## Requirements
 
@@ -17,7 +17,8 @@ The npm package bundles prebuilt binaries for Linux x64/arm64 (glibc), macOS x64
 pnpm install
 pnpm build        # native module (napi) + TypeScript wrapper (dist/)
 pnpm typecheck    # lib, tests and bench
-pnpm test         # loopback e2e against node-datachannel
+pnpm test         # loopback e2e + 50-peer load test against node-datachannel
+pnpm test:soak    # memory/thread leak soak with peer churn (SOAK_SECONDS, SOAK_PEERS)
 pnpm test:rust    # pacer unit tests
 ```
 
@@ -38,11 +39,15 @@ The WebRTC stack is [stasadance/rtc](https://github.com/stasadance/rtc/tree/lagl
 pnpm build && pnpm exec playwright install chromium   # or CHROMIUM_PATH=/path/to/chrome
 node bench/run.mts rtc+rack+pace 1 5 1 45      # kind gate loss% seed seconds [rttMs]
 bench/matrix.sh results.jsonl rtc+rack+pace rtc ndc
+bench/scenarios.sh scenarios.jsonl            # bufferbloat, 8-peer contention, bursty loss, jitter, RTT swing, 400 ms
 node bench/summarize.mts results.jsonl
 ```
+
+Flags for one run: `--peers N`, `--rate KBps` (shared server-to-client bottleneck), `--up-rate`, `--queue ms`,
+`--ge p,r,lossBad[,lossGood]` (Gilbert-Elliott bursty loss), `--jitter ms`, `--swing ms,periodS`, `--label name`.
 
 Kinds: `ndc` (node-datachannel), `rtc` (lagless, gate only), `+rack`, `+pace`, `+rto<ms>`.
 
 ## Release
 
-Bump `version` in `package.json` and merge to `main`. The release workflow builds all five platforms, puts every binary in the one `lagless` package and publishes it to npm with trusted publishing (no token, no tag). A push whose version is already on npm publishes nothing.
+Bump `version` in `package.json` and merge to `main`. The release workflow builds all seven targets, puts every binary in the one `lagless` package and publishes it to npm with trusted publishing (no token, no tag). A push whose version is already on npm publishes nothing.

@@ -13,7 +13,7 @@ The goal: ping stays near the real round-trip time even at 5% packet loss, inste
 pnpm add lagless
 ```
 
-Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (glibc), macOS x64/arm64 and Windows x64. On anything else, [build from source](/lagless/docs/build/). Then head to the [API](/lagless/docs/api/).
+Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (glibc and musl), macOS x64/arm64 and Windows x64. On anything else, [build from source](/lagless/docs/build/). Then head to the [API](/lagless/docs/api/).
 
 ## What you get
 
@@ -27,4 +27,4 @@ Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (gli
 
 - Host candidate only (no STUN/TURN gathering on the server) and non-trickle offers. Players behind strict NAT or UDP-blocking networks connect through a TURN server set in the browser's `iceServers`; the server needs nothing extra.
 - lagless controls the **server to client** direction, which is where heavy snapshot traffic goes. The **client to server** direction is the browser's own SCTP stack (Chrome's dcSCTP), which no server library can change.
-- Tested on Linux x64. Prebuilt targets: Linux x64/arm64, macOS x64/arm64, Windows x64.
+- Prebuilt targets: Linux x64/arm64 (glibc and musl), macOS x64/arm64, Windows x64. CI runs the end-to-end tests on every one of them (Linux x64 on each PR, the rest on main).

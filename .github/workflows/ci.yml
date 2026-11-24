@@ -15,6 +15,7 @@ on:
       - "**.md"
       - ".github/workflows/website.yml"
       - ".github/workflows/release.yml"
+  workflow_dispatch:
 
 # one run per branch/PR: a new push cancels the old run
 concurrency:
@@ -22,6 +23,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # every PR and main push: Linux x64, loopback e2e + TURN + 50-peer load test + Rust tests
   test:
     runs-on: ubuntu-latest
     steps:
@@ -34,7 +36,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          # PRs restore main's cache but don't write their own
+          # PRs restore main's cache but don't save their own
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: sudo apt-get update && sudo apt-get install -y coturn
       - run: pnpm install --frozen-lockfile
@@ -42,3 +44,56 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:rust
+
+  # main (or by hand) only: e2e on the other prebuilt platforms, Alpine/musl, and a soak
+  platforms:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04-arm, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test
+
+  alpine:
+    if: github.event_name != 'pull_request'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker run --rm -v "$PWD:/w" node:22-alpine sh /w/.github/scripts/alpine.sh ${{ matrix.target }} test
+
+  # memory / thread leak soak with peer churn (Linux counts threads)
+  soak:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - run: pnpm test:soak
+        env:
+          SOAK_SECONDS: 300

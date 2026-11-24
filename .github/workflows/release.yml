@@ -1,5 +1,5 @@
 name: release
-# Builds the five platforms only when a push to main changes package.json and its version
+# Builds the seven targets only when a push to main changes package.json and its version
 # isn't on npm yet (= a release). Re-run by hand with workflow_dispatch.
 on:
   push:
@@ -42,22 +42,33 @@ jobs:
           - { os: macos-latest, target: x86_64-apple-darwin }
           - { os: macos-latest, target: aarch64-apple-darwin }
           - { os: windows-latest, target: x86_64-pc-windows-msvc }
+          - { os: ubuntu-latest, target: x86_64-unknown-linux-musl, alpine: true }
+          - { os: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, alpine: true }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      # musl builds run inside Alpine (musl libc), the rest natively
+      - if: matrix.alpine
+        run: docker run --rm -v "$PWD:/w" node:22-alpine sh /w/.github/scripts/alpine.sh ${{ matrix.target }}
+      - if: ${{ !matrix.alpine }}
+        uses: pnpm/action-setup@v4
+      - if: ${{ !matrix.alpine }}
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - if: ${{ !matrix.alpine }}
+        uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      - if: ${{ !matrix.alpine }}
+        uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.target }}
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm build:native --target ${{ matrix.target }}
+      - if: ${{ !matrix.alpine }}
+        run: pnpm install --frozen-lockfile
+      - if: ${{ !matrix.alpine }}
+        run: pnpm build:native --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
@@ -96,5 +107,5 @@ jobs:
         with:
           name: loader
       - run: pnpm build:ts
-      - run: ls -l *.node && test $(ls *.node | wc -l) -eq 5
+      - run: ls -l *.node && test $(ls *.node | wc -l) -eq 7
       - run: npm publish --access public
