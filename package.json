@@ -1,6 +1,6 @@
 {
   "name": "lagless",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Low-latency WebRTC data channels for real-time games. Rust (webrtc-rs) native module for Node.js.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,7 +25,8 @@
   "files": [
     "dist",
     "binding.js",
-    "binding.d.ts"
+    "binding.d.ts",
+    "*.node"
   ],
   "napi": {
     "binaryName": "lagless",
