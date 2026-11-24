@@ -20,6 +20,7 @@ use rtc::peer_connection::RTCPeerConnectionBuilder;
 use rtc::peer_connection::configuration::RTCConfigurationBuilder;
 use rtc::peer_connection::configuration::setting_engine::SettingEngineBuilder;
 use rtc::peer_connection::sdp::RTCSessionDescription;
+use rtc::ice::mdns::MulticastDnsMode;
 use rtc::peer_connection::transport::{CandidateConfig, CandidateHostConfig, RTCIceCandidate};
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
@@ -328,7 +329,10 @@ impl Server {
     /// Binds the shared UDP socket and starts the event-loop thread (idle until peers exist).
     #[napi(constructor)]
     pub fn new(opts: Option<ServerOptions>) -> Result<Self> {
-        let _ = env_logger::try_init();
+        // silent unless the app opts in: LAGLESS_LOG=debug (env_logger filter syntax)
+        if std::env::var_os("LAGLESS_LOG").is_some() {
+            let _ = env_logger::Builder::from_env("LAGLESS_LOG").try_init();
+        }
         let opts = opts.unwrap_or(ServerOptions {
             unreliable_limit: None,
             reliable_limit: None,
@@ -719,6 +723,8 @@ impl AcceptTask {
         };
         let mut seb = SettingEngineBuilder::new()
             .with_lite(true)
+            // browsers' .local host candidates: skip mDNS resolution, peer-reflexive covers them
+            .with_multicast_dns_mode(MulticastDnsMode::Disabled)
             .with_sctp_rack(self.rack)
             .with_sctp_weighted_fair_queueing(self.wfq);
         if let Some(ms) = self.rto_min {
