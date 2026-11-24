@@ -1,7 +1,7 @@
 // Audio RTP on the same peer as the data channels, against headless browsers:
 // mic (sendonly) + 4 playback slots (recvonly) + 2 data channels in one offer.
-// Chromium always runs (CHROMIUM_PATH to pick a binary). Firefox and WebKit run when
-// Playwright has them installed, and are skipped otherwise.
+// A browser Playwright doesn't have installed is skipped (CHROMIUM_PATH picks a Chromium
+// binary), unless LAGLESS_REQUIRE_BROWSERS=1, as in CI's test job, which installs all three.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { chromium, firefox, webkit, type Browser, type Page } from 'playwright';
@@ -42,9 +42,9 @@ async function launch(name: Name): Promise<Browser> {
   });
 }
 
-/** Launch errors (browser not installed) skip that browser's tests; Chromium must work. */
+/** Launch errors (browser not installed) skip that browser's tests. */
 async function available(name: Name): Promise<string | false> {
-  if (name === 'chromium') return false;
+  if (process.env.LAGLESS_REQUIRE_BROWSERS === '1') return false;
   try {
     const b = await launch(name);
     const ok = await (await b.newPage()).evaluate(() => typeof RTCPeerConnection === 'function');
