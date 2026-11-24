@@ -54,3 +54,37 @@ What changed vs 01–03:
 - **RTT swings** (200 → 600 ms every 20 s): lagless is best but weakest here: ping p95 1.08 s, 71% of
   unreliable dropped, 7 KB/s unreliable goodput. The pacer's min-RTT / drain rule reads the swing as queueing.
 - **400 ms RTT, 2% loss**: ping p50 402 ms (≈ RTT) vs 1.6 s / 10.8 s; unreliable goodput is low for all three.
+
+## Re-run after #13 and the SCTP cwnd floor (2026-11-24)
+
+The table above predates #13 (unreliable gated on SCTP's unsent bytes, pacer RTT re-baseline) and the
+cwnd floor (rtc fork `9e4c4bf`: on loss, the pacer keeps SCTP's cwnd at rate × (base RTT + 40 ms) as
+long as RTT hasn't grown, so random loss stops halving it to 4 MTU). Same setup, 1 seed × 20 s. Raw:
+[04-scenarios-rerun.jsonl](04-scenarios-rerun.jsonl) (lagless with the floor, then the #13-only run
+of `bursty`, `rtt-swing` and `rtt400` with ndc).
+
+| scenario | config | ping p50 | ping p95 | state age p95 | reliable age p95 | goodput u/r KB/s | unrel dropped |
+|---|---|---|---|---|---|---|---|
+| random5 | lagless (floor) | 202 | 202 | 102 | 303 | 26/12 | 1% |
+| bloat | lagless (floor) | 281 | 396 | 295 | 389 | 9.5/11.9 | 65% |
+| bloat-loss | lagless (floor) | 240 | 330 | 241 | 389 | 17.3/12 | 34% |
+| contention8 | lagless (floor) | 331 | 468 | 371 | 500 | 12.8/12 | 52% |
+| bursty | lagless (floor) | 202 | 202 | 102 | 104 | 26.9/12 | 1% |
+| bursty | lagless (#13 only) | 202 | 276 | 181 | 263 | 22.3/11.9 | 15% |
+| bursty | ndc-gate | 210 | 998 | 834 | 307 | 26.3/11.8 | 0% |
+| jitter | lagless (floor) | 229 | 252 | 129 | 258 | 27/12 | 3% |
+| rtt-swing | lagless (floor) | 388 | 600 | 360 | 1374 | 2.2/11.1 | 92% |
+| rtt-swing | lagless (#13 only) | 449 | 745 | 376 | 1458 | 9.6/12.5 | 68% |
+| rtt-swing | ndc-gate | 1451 | 5136 | 5131 | 3575 | 16.1/12.1 | 37% |
+| rtt400 | lagless (floor) | 401 | 402 | 202 | 601 | 25.8/11.9 | 11% |
+| rtt400 | lagless (#13 only) | 402 | 723 | 522 | 672 | 4/11.8 | 83% |
+| rtt400 | ndc-gate | 1815 | 7607 | 8074 | 6480 | 2.6/9.3 | 87% |
+
+- **Random and bursty loss**: with the floor, loss no longer costs throughput: unreliable goodput is back
+  at the offered ~27 KB/s and ping p95 stays at the RTT. Bursty reliable p95 is 104 ms vs ndc's 307.
+- **400 ms RTT, 2% loss**: unreliable goodput 4 → 25.8 KB/s, ping p95 723 → 402 ms. The limit was
+  SCTP's Reno cwnd, not the pacer: every reliable loss halved it to the 4 MTU minimum (~15 KB/s at 400 ms).
+- **Bufferbloat** is unchanged. The floor is off while srtt is above the lowest RTT seen, so tail-drop loss
+  still cuts cwnd normally.
+- **RTT swing** is still open: while the path RTT is up, the floor is off (it can't tell the swing from
+  a queue), so it's no better than #13 alone. Single seeds swing a lot here (2.2 vs 9.6 KB/s).
