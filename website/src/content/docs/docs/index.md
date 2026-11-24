@@ -25,6 +25,5 @@ Node.js 18+. One package with prebuilt binaries bundled for Linux x64/arm64 (gli
 
 ## Limits (v1)
 
-- Host candidate only (no STUN/TURN gathering on the server) and non-trickle offers. Players behind strict NAT or UDP-blocking networks connect through a TURN server set in the browser's `iceServers`; the server needs nothing extra.
-- lagless controls the **server to client** direction, which is where heavy snapshot traffic goes. The **client to server** direction is the browser's own SCTP stack (Chrome's dcSCTP), which no server library can change.
+- One host candidate per advertised IP. Behind a NAT, `publicAddress()` gets the mapped IP and port over STUN. Players behind strict NAT or UDP-blocking networks connect through a TURN server set in the browser's `iceServers`; the server needs nothing extra.
 - Prebuilt targets: Linux x64/arm64 (glibc and musl), macOS x64/arm64, Windows x64. CI runs the end-to-end tests on every one of them (Linux x64 on each PR, the rest on main).

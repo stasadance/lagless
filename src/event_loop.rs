@@ -59,6 +59,12 @@ pub enum Cmd {
     /// close a peer gracefully with this reason (e.g. reliable-overflow)
     Kick(u32, &'static str),
     CloseAll,
+    /// send a STUN Binding request from the shared socket; the mapped address goes to `reply`
+    Stun {
+        to: SocketAddr,
+        txid: [u8; 12],
+        reply: Sender<SocketAddr>,
+    },
     Shutdown,
 }
 
@@ -159,6 +165,8 @@ pub struct Loop {
     next_tick: Option<Instant>,
     last_stats: Instant,
     buf: Vec<u8>,
+    /// open STUN transactions: txid -> (server, started, reply)
+    stun: HashMap<[u8; 12], (SocketAddr, Instant, Sender<SocketAddr>)>,
 }
 
 /// Bind the shared socket and build the loop; the caller runs it on its own thread.
@@ -207,6 +215,7 @@ pub fn new(
             next_tick: None,
             last_stats: Instant::now(),
             buf: vec![0u8; 65536],
+            stun: HashMap::new(),
         },
         ctl,
     ))
@@ -296,6 +305,7 @@ impl Loop {
                         self.remove(id, "local", true);
                     }
                 }
+                Ok(Cmd::Stun { to, txid, reply }) => self.stun_send(to, txid, reply),
                 Ok(Cmd::Shutdown) | Err(TryRecvError::Disconnected) => return false,
                 Err(TryRecvError::Empty) => return true,
             }
@@ -331,6 +341,23 @@ impl Loop {
             self.next_tick = Some(now + self.tick_every());
         }
         self.dirty.insert(np.id);
+    }
+
+    fn stun_send(&mut self, to: SocketAddr, txid: [u8; 12], reply: Sender<SocketAddr>) {
+        let now = Instant::now();
+        // the caller retransmits with the same txid and gives up after its timeout
+        self.stun
+            .retain(|_, (_, t, _)| now.saturating_duration_since(*t) < Duration::from_secs(30));
+        self.stun.entry(txid).or_insert((to, now, reply));
+        let dst = match to {
+            SocketAddr::V4(a) if self.v6 => {
+                SocketAddr::new(a.ip().to_ipv6_mapped().into(), a.port())
+            }
+            a => a,
+        };
+        if let Err(e) = self.sock.send_to(&crate::stun::binding_request(&txid), dst) {
+            log::debug!("lagless: STUN send_to {dst}: {e}");
+        }
     }
 
     fn tick_every(&self) -> Duration {
@@ -383,6 +410,14 @@ impl Loop {
             };
             let from = canonical(from);
             let pkt = &self.buf[..n];
+            if let Some((txid, mapped)) = crate::stun::binding_response(pkt)
+                && self.stun.get(&txid).is_some_and(|(to, _, _)| *to == from)
+            {
+                if let Some((_, _, reply)) = self.stun.remove(&txid) {
+                    let _ = reply.send(canonical(mapped));
+                }
+                continue;
+            }
             let id = match crate::stun::binding_ufrag(pkt)
                 .and_then(|u| self.by_ufrag.get(u))
                 .copied()

@@ -10,7 +10,7 @@ import { Server } from "lagless";
 
 const server = new Server({ port: 7000 }); // one UDP port for every peer; unreliableLimit 65536, rack true, pacer true
 
-// Signaling is yours: get the browser's offer (gathering complete, non-trickle) over HTTP or WebSocket.
+// Signaling is yours: get the browser's offer over HTTP or WebSocket (no need to wait for ICE gathering).
 const { peer, answer } = await server.accept(offer, PUBLIC_IP); // or [PUBLIC_IPV4, PUBLIC_IPV6]
 // Send `answer` ({ type, sdp }) back to the browser.
 
@@ -61,9 +61,13 @@ All peers share one UDP socket and one native thread. Inbound datagrams are matc
 
 The UDP port every peer shares.
 
+## `publicAddress(stunServer, timeoutMs = 3000)` → `Promise<{ ip, port }>`
+
+Sends a STUN Binding request from the shared UDP port and resolves with the address the STUN server saw, which is the NAT's mapping for that port. Pass it to `accept(offer, ip, port)`. `stunServer` is `host[:port]` (port 3478 by default, a `stun:` prefix is fine). Retransmits until `timeoutMs`, then rejects. The NAT must let inbound UDP reach that mapping (1:1 NAT or a port forward).
+
 ## `accept(offer, advertiseIp, advertisePort = 0)` → `Promise<{ peer, answer, localPort }>`
 
-Accepts a complete, non-trickle offer, either as a `{ type, sdp }` object or its JSON string. Building the peer runs off the JS thread. `answer` is a `{ type, sdp }` object. It carries one host candidate per advertise IP (`advertiseIp` is a string or an array, IPv4 and/or IPv6) at `advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means `localPort`, which is also returned. With several IPs of the same family, inbound packets are tagged with the first one; use them for addresses that reach the same host.
+Accepts an offer, either as a `{ type, sdp }` object or its JSON string. The offer can be sent before ICE gathering finishes (trickle): the server is ICE-lite and learns the client's address from its connectivity checks, so later client candidates aren't needed. Building the peer runs off the JS thread. `answer` is a `{ type, sdp }` object. It carries one host candidate per advertise IP (`advertiseIp` is a string or an array, IPv4 and/or IPv6) at `advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means `localPort`, which is also returned. With several IPs of the same family, inbound packets are tagged with the first one; use them for addresses that reach the same host.
 
 ## `send(peer, label, data, { exempt }?)` → `boolean`
 

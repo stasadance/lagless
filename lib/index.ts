@@ -81,7 +81,19 @@ export class Server extends EventEmitter<Events> {
   }
 
   /**
-   * Accept a complete (non-trickle) offer. The answer carries one host candidate per
+   * The server's public address as a STUN server sees it, asked from the shared UDP port,
+   * so a NAT's mapping for that port is what comes back. Pass it to `accept()`:
+   * `accept(offer, a.ip, a.port)`. `stunServer` is `host[:port]` (default port 3478).
+   * Retransmits until `timeoutMs`, then rejects.
+   */
+  async publicAddress(stunServer: string, timeoutMs = 3000): Promise<{ ip: string; port: number }> {
+    return this.native.publicAddress(stunServer, timeoutMs);
+  }
+
+  /**
+   * Accept an offer. It may be sent before ICE gathering finishes (trickle): the server is
+   * ICE-lite and learns the client's address from its checks, so the client's later
+   * candidates aren't needed. The answer carries one host candidate per
    * advertise IP (IPv4 and/or IPv6) at `advertisePort`; 0 means the server's port.
    */
   async accept(offer: SessionDescription | string, advertiseIp: string | string[], advertisePort = 0): Promise<Accepted> {
