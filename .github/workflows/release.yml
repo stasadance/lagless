@@ -33,11 +33,20 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - run: pnpm install --frozen-lockfile
-      - run: pnpm build --target ${{ matrix.target }}
+      - run: pnpm build:native --target ${{ matrix.target }}
       - uses: actions/upload-artifact@v4
         with:
           name: bindings-${{ matrix.target }}
           path: '*.node'
+          if-no-files-found: error
+      # the generated loader + types are the same on every platform; keep one copy
+      - if: matrix.target == 'x86_64-unknown-linux-gnu'
+        uses: actions/upload-artifact@v4
+        with:
+          name: loader
+          path: |
+            binding.js
+            binding.d.ts
           if-no-files-found: error
 
   publish:
@@ -61,6 +70,11 @@ jobs:
           path: artifacts
           pattern: bindings-*
           merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: loader
+      - run: pnpm build:ts
+      - run: pnpm napi create-npm-dirs
       - run: pnpm napi artifacts --output-dir artifacts
       # publishes npm/* platform packages and adds them as optionalDependencies
       - run: pnpm napi pre-publish -t npm

@@ -1,6 +1,6 @@
 //! lagless: low-latency WebRTC data channel server for Node.js.
 //!
-//! Built on the sans-IO webrtc-rs `rtc` stack (vendored with RACK-TLP and
+//! Built on the sans-IO webrtc-rs `rtc` stack (our fork, with RACK-TLP and
 //! transport-stats patches). Per peer: one worker thread and one UDP socket.
 //! Unreliable sends are gated on the true SCTP queue and on a per-peer pacer
 //! budget, so stale game state is dropped instead of queued.

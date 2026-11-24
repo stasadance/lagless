@@ -3,7 +3,7 @@
 **Result: RACK cuts the ping tail by about 30–40%, and at 5% loss it carries about 25% more unreliable state. At 2% loss it carries less, though, because it now reacts to every lost unreliable chunk by halving cwnd.**
 
 ## What was built
-These are patches on webrtc-rs/rtc @ 0fbcaa7, in [vendor/patches/](../../vendor/patches/):
+These are patches on webrtc-rs/rtc @ 0fbcaa7, on the [stasadance/rtc `lagless` branch](https://github.com/stasadance/rtc/commits/lagless):
 - RFC 8985 time-based loss marking on each SACK, plus a reordering-window timer. A chunk counts as lost once it was sent more than reo_wnd before the newest delivered chunk, so it no longer needs 3 dup SACKs.
 - Tail loss probe: PTO = 2·SRTT (+200 ms when one chunk is in flight), never later than T3. It resends the highest outstanding chunk, or sends FORWARD-TSN when everything outstanding was abandoned.
 - `last_sent` per chunk, so a lost retransmission gets detected too. One cwnd cut per recovery episode.

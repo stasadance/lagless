@@ -6,14 +6,14 @@ ping every 200 ms on the unreliable channel. Reports ping, one-way state/reliabl
 and goodput.
 
 ```sh
-pnpm add -D playwright && pnpm exec playwright install chromium
-node bench/run.js rtc+rack+pace 1 5 1 45      # kind gate loss% seed seconds [rttMs]
+pnpm build && pnpm exec playwright install chromium   # or CHROMIUM_PATH=/path/to/chrome
+node bench/run.mts rtc+rack+pace 1 5 1 45      # kind gate loss% seed seconds [rttMs]
 bench/matrix.sh results.jsonl rtc+rack+pace rtc ndc   # LOSSES, SEEDS, DUR, RTT, GATE env
-node bench/summarize.js results.jsonl
+node bench/summarize.mts results.jsonl
 ```
 
 Kinds: `ndc` (node-datachannel), `rtc` (lagless, gate only), `+rack`, `+pace`, `+rto<ms>`.
 
-Write-ups and raw results from development: [results/](results/)
+Write-ups from development: [results/](results/)
 (01 spike, 02 RACK-TLP, 03 pacer). Note: 03 switched the tick to send reliable before unreliable,
 so compare 03 rows with each other, not across files.
