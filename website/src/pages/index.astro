@@ -30,7 +30,7 @@ const features = [
     },
     {
         title: "Rust core, Node API",
-        body: "A napi-rs binding over the webrtc-rs rtc sans-IO core, with a node-datachannel style API and batched drain.",
+        body: "A napi-rs binding over the webrtc-rs rtc sans-IO core, with a typed TypeScript API on top.",
     },
 ];
 ---
@@ -121,11 +121,10 @@ const features = [
                         <a href={`${base}/docs/api/`}>API reference →</a>
                     </div>
                     <pre><code><span class="c">// every tick, per player</span>
-server.send(peer, <span class="s">"reliable"</span>, events, <span class="k">false</span>);
+server.send(peer, <span class="s">"reliable"</span>, events);
 <span class="k">for</span> (<span class="k">const</span> snap <span class="k">of</span> snapshots) {"{"}
-  <span class="k">if</span> (!server.send(peer, <span class="s">"state"</span>, snap, <span class="k">false</span>)) {"{"}
-    <span class="k">break</span>; <span class="c">// dropped: send fresher state next tick</span>
-  {"}"}
+  <span class="k">if</span> (!server.send(peer, <span class="s">"state"</span>, snap)) <span class="k">break</span>;
+  <span class="c">// dropped: send fresher state next tick</span>
 {"}"}</code></pre>
                 </section>
             </main>

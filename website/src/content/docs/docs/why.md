@@ -14,7 +14,7 @@ These were measured while hunting lag in a real game on node-datachannel (libdat
 | Hidden 1 MiB usrsctp send buffer, so `bufferedAmount` lies | Pure Rust SCTP. The whole queue (pending + in flight) is ours and exposed |
 | cwnd and stack queue need a C++ patch to read | cwnd, ssthresh, srtt exposed per peer |
 | Some options silently ignored | Unknown options throw |
-| No RACK/TLP, so loss waits for the RTO and p95 spikes | RACK-TLP (RFC 8985) in the vendored rtc-sctp |
+| No RACK/TLP, so loss waits for the RTO and p95 spikes | RACK-TLP (RFC 8985) in our rtc-sctp fork |
 | No real priority between reliable and unreliable | Per-peer pacer: reliable first, unreliable fills the rest |
 
 ## The numbers

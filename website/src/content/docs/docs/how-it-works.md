@@ -4,14 +4,14 @@ description: "lagless internals: the rtc sans-IO core, RACK-TLP and the per-peer
 ---
 
 ```
-Node API
-  send(peer, label, buf, exempt) -> bool (false = dropped, keep owed)
-  budget(peer)                   -> bytes allowed right now
-  stats(peer)                    -> true queue, cwnd, srtt, minRtt, counters
-  drain()                        -> every inbound message, one N-API call
+TypeScript API (Server extends EventEmitter)
+  send(peer, label, buf, { exempt }) -> bool (false = dropped, keep owed)
+  budget(peer)                       -> bytes allowed right now
+  stats(peer)                        -> true queue, cwnd, srtt, minRtt, counters
+  on("message")                      -> fed by one batched native drain per ms
 napi-rs bridge
 Rust core, one worker thread + one UDP socket per peer
-  webrtc-rs rtc (vendored, patched): ICE-lite, DTLS, SCTP + RACK-TLP, exposed sender state
+  webrtc-rs rtc (stasadance/rtc fork): ICE-lite, DTLS, SCTP + RACK-TLP, exposed sender state
   own UDP loop and clock (sans-IO)
   true-queue gate (64 KiB) + per-peer pacer
 ```

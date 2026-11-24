@@ -1,34 +1,30 @@
 ---
 title: API
-description: "The lagless server API: acceptOffer, send, budget, drain and stats."
+description: "The lagless server API: accept, send, on('message'), budget and stats."
 ---
 
 ## Quick start
 
-```js
-const { Server } = require("lagless");
+```ts
+import { Server } from "lagless";
 
 const server = new Server(); // unreliableLimit 65536, rack true, pacer true, bindAddress "0.0.0.0"
 
 // Signaling is yours: get the browser's offer (gathering complete, non-trickle) over HTTP or WebSocket.
-const { peer, answer } = server.acceptOffer(offerJson, PUBLIC_IP, 0);
-// Send `answer` (JSON { type, sdp }) back to the browser.
+const { peer, answer } = server.accept(offer, PUBLIC_IP);
+// Send `answer` ({ type, sdp }) back to the browser.
 
-setInterval(() => {
-    for (const m of server.drain()) handle(m.peer, m.label, m.data); // all inbound, one call
-}, 1);
+server.on("message", ({ peer, label, data }) => handle(peer, label, data));
 
 function tick() {
-    server.send(peer, "reliable", events, false); // reliable: always queued
+    server.send(peer, "reliable", events); // reliable: always queued
     for (const snap of snapshots) {
-        if (!server.send(peer, "state", snap, false)) {
-            break; // unreliable: false = dropped, keep it owed and send fresher state next tick
-        }
-    }
+        if (!server.send(peer, "state", snap)) break; // unreliable: false = dropped, keep it owed
+    } // next tick sends fresher absolute state
 }
 
 // Latency probes bypass the gate and the pacer:
-server.send(peer, "state", pong, true);
+server.send(peer, "state", pong, { exempt: true });
 ```
 
 Browser side:
@@ -39,6 +35,8 @@ const reliable = pc.createDataChannel("reliable");
 // Wait for ICE gathering to complete, then send pc.localDescription to your server.
 ```
 
+Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
+
 ## `new Server(options?)`
 
 | option | default | meaning |
@@ -48,29 +46,30 @@ const reliable = pc.createDataChannel("reliable");
 | `pacer` | `true` | Per-peer send pacer: unreliable sends need budget tokens |
 | `rtoMin` | `1000` | SCTP RTO lower bound in ms (RFC 9260) |
 | `bindAddress` | `"0.0.0.0"` | Local address peer sockets bind to |
+| `drainIntervalMs` | `1` | How often received messages are pulled from the native side, in ms |
 
 64 KiB is a good default. Smaller caps throughput for no gain: 64 KiB still carries about 120 KB/s at 300 ms RTT.
 
-## `acceptOffer(offerJson, advertiseIp, advertisePort)` → `{ peer, answer, localPort }`
+## `accept(offer, advertiseIp, advertisePort = 0)` → `{ peer, answer, localPort }`
 
-Accepts a full, non-trickle offer (`{ type, sdp }` as JSON). The answer carries one host candidate `advertiseIp:advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means the bound port.
+Accepts a complete, non-trickle offer, either as a `{ type, sdp }` object or its JSON string. `answer` is a `{ type, sdp }` object. It carries one host candidate `advertiseIp:advertisePort`, so a NAT or test shaper can sit in front. `advertisePort` `0` means the port the peer's socket bound to, which is also returned as `localPort`.
 
-## `send(peer, label, data, exempt)` → `boolean`
+## `send(peer, label, data, { exempt }?)` → `boolean`
 
-Sends a `Buffer` on the channel named `label`.
+Sends a `Buffer` or `Uint8Array` on the channel named `label`.
 
 - Returns `false` only for unreliable channels, when the gate or the pacer budget refused it. Keep that state owed and send fresher state next tick.
 - Reliable sends always go, and spend budget first.
-- `exempt = true` bypasses the gate and the pacer. Use it for ping/pong so ping measures the real queue.
+- `{ exempt: true }` bypasses the gate and the pacer. Use it for ping/pong so ping measures the real queue.
 - Throws if the channel isn't open.
+
+## `on("message", ({ peer, label, data }) => …)`
+
+Fires for every message received from any peer. `Server` is an `EventEmitter`.
 
 ## `budget(peer)` → `number`
 
 Bytes the pacer allows right now. It can go negative after a burst of reliable sends.
-
-## `drain()` → `{ peer, label, data }[]`
-
-Every message received since the last call, from all peers, in one N-API call.
 
 ## `stats(peer)` → `PeerStats | null`
 
@@ -88,6 +87,10 @@ Every message received since the last call, from all peers, in one N-API call.
 | `dropped`, `pacedDrops`, `sentUnreliable` | unreliable sends dropped by the gate / pacer, and sent |
 | `rackLost`, `rackProbes`, `t3Timeouts` | RACK losses, tail loss probes, RTO timeouts |
 
-## `close(peer)`, `closeAll()`
+## `closePeer(peer)`, `close()`
 
-Close one peer and stop its worker, or close every peer.
+Close one peer, or close every peer and stop emitting messages.
+
+## `native`
+
+The raw Rust binding, if you need it.
