@@ -94,16 +94,29 @@ client against coturn.
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
 | `accept(offer, advertiseIp, advertisePort = 0)` | `offer` is `{ type, sdp }` or its JSON. → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
-| `send(peer, label, data, { exempt }?)` | → `boolean`. `false` only for unreliable channels (gate or budget). Throws if the channel isn't open |
-| `on('message', ({ peer, label, data }) => …)` | every inbound message, all peers |
+| `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate or budget), or reliable hit `reliableLimit` (peer closed, `closeReason: 'reliable-overflow'`). Throws if the peer is closed, the channel isn't open or `data` exceeds the max message size |
+| `on('message', ({ peer, label, data, isString }) => …)` | every inbound message, all peers. `isString`: the sender sent a string |
 | `budget(peer)` | bytes the pacer allows right now (negative after a reliable burst) |
-| `stats(peer)` | `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts` |
+| `stats(peer)` | `connected, closed, stackOutstanding, pendingCmd, dropped, pacedDrops, sentUnreliable, budget, rate, draining, srttMs, minRttMs, cwnd, inflight, pending, rackLost, rackProbes, t3Timeouts, reliableOverflows, sendErrors, lastSendError, overloaded, overloads, closeReason` |
 | `closePeer(peer)`, `close()` | |
 | `native` | the raw Rust binding |
 
 Unreliable messages should carry absolute state (full position, not deltas) so any one can be dropped.
+
+Notes:
+
+- **Which channels are gated.** A channel opened with `maxRetransmits` or `maxPacketLifeTime` (any value,
+  so `maxRetransmits: 3` too) counts as unreliable: gated and paced. Every other channel is reliable.
+- **Reliable overload.** Reliable sends always go and may push the budget negative. `stats().overloaded`
+  turns true when the budget stayed below zero for `overloadMs`: reliable load alone fills the link and
+  unreliable gets nothing. Shed reliable load or kick the peer.
+- **Send failures.** A message rtc refuses after `send()` returned `true` (channel closing, ...) bumps
+  `stats().sendErrors` and sets `lastSendError`.
+- **Threading.** `send()` admission is atomic (CAS on the reservation and the budget), but it compares
+  against the worker's last snapshot of the SCTP queue, so limits can be off by one loop's worth of sends.
+  Call a Server from one JS thread.
 
 ## Results
 

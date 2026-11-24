@@ -118,3 +118,68 @@ test('unknown channel and unknown peer are errors', () => {
   assert.strictEqual(server.budget(42), 0);
   server.close();
 });
+
+async function connect(server: Server, pc: ndc.PeerConnection) {
+  const r = pc.createDataChannel('r');
+  const got: (string | Buffer)[] = [];
+  r.onMessage((m) => got.push(typeof m === 'string' ? m : Buffer.from(m as Buffer)));
+  let gathered = false;
+  pc.onGatheringStateChange((s) => { if (s === 'complete') gathered = true; });
+  pc.setLocalDescription();
+  await waitFor('gathering', () => gathered || pc.gatheringState() === 'complete');
+  const offer = pc.localDescription();
+  assert.ok(offer);
+  const inbox: Message[] = [];
+  server.on('message', (m) => inbox.push(m));
+  const acc = server.accept({ type: 'offer', sdp: offer.sdp }, '127.0.0.1');
+  pc.setRemoteDescription(acc.answer.sdp, 'answer');
+  await waitFor('channel open', () => r.isOpen());
+  await waitFor('server channel open', () => {
+    try { return server.send(acc.peer, 'r', Buffer.alloc(0)); } catch { return false; }
+  });
+  return { peer: acc.peer, r, got, inbox };
+}
+
+test('string messages keep their type both ways', { timeout: 30000 }, async () => {
+  const server = new Server();
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const { peer, r, got, inbox } = await connect(server, pc);
+    r.sendMessage('hi-text');
+    r.sendMessageBinary(Buffer.from('hi-bin'));
+    await waitFor('server inbox', () => inbox.length >= 2);
+    assert.deepStrictEqual(inbox.map((m) => [m.data.toString(), m.isString]), [['hi-text', true], ['hi-bin', false]]);
+    got.length = 0;
+    assert.strictEqual(server.send(peer, 'r', 'yo-text'), true);
+    assert.strictEqual(server.send(peer, 'r', Buffer.from('yo-bin')), true);
+    await waitFor('client inbox', () => got.length >= 2);
+    assert.strictEqual(got[0], 'yo-text');
+    assert.ok(Buffer.isBuffer(got[1]) && got[1].toString() === 'yo-bin');
+    assert.strictEqual(server.stats(peer)?.sendErrors, 0);
+  } finally {
+    pc.close();
+    server.close();
+  }
+});
+
+test('reliable byte cap kicks the peer', { timeout: 30000 }, async () => {
+  const server = new Server({ reliableLimit: 64 * 1024 });
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const { peer } = await connect(server, pc);
+    const chunk = Buffer.alloc(16 * 1024);
+    let ok = 0;
+    while (server.send(peer, 'r', chunk)) ok++;
+    assert.ok(ok >= 1 && ok < 64, `sent ${ok} chunks before overflow`);
+    const st = server.stats(peer);
+    assert.ok(st);
+    assert.strictEqual(st.closeReason, 'reliable-overflow');
+    assert.strictEqual(st.reliableOverflows, 1);
+    assert.strictEqual(st.closed, true);
+    assert.throws(() => server.send(peer, 'r', chunk), /peer closed/);
+  } finally {
+    pc.close();
+    server.close();
+    ndc.cleanup();
+  }
+});

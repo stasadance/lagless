@@ -5,6 +5,7 @@
 //! Unreliable sends are gated on the true SCTP queue and on a per-peer pacer
 //! budget, so stale game state is dropped instead of queued.
 
+mod gate;
 mod pacer;
 
 use bytes::BytesMut;
@@ -30,10 +31,11 @@ struct Inbound {
     peer: u32,
     label: String,
     data: Vec<u8>,
+    is_string: bool,
 }
 
 enum Cmd {
-    Send { label: String, data: Vec<u8> },
+    Send { label: String, data: Vec<u8>, is_string: bool },
     Close,
 }
 
@@ -63,6 +65,15 @@ struct PeerShared {
     rack_lost: AtomicU64,
     rack_probes: AtomicU64,
     t3_timeouts: AtomicU64,
+    // send outcomes (see gate.rs)
+    reliable_overflows: AtomicU64,
+    send_errors: AtomicU64,
+    last_send_error: Mutex<Option<String>>,
+    overloaded: AtomicBool,
+    overloads: AtomicU64,
+    /// negotiated SCTP max message size, 0 until known
+    max_message_size: AtomicUsize,
+    close_reason: Mutex<Option<String>>,
 }
 
 struct Peer {
@@ -74,7 +85,19 @@ struct Peer {
 pub struct ServerOptions {
     /// Drop an unreliable send when bytes not yet released by SCTP + its length
     /// would exceed this. 0 disables the gate. Default 65536.
+    ///
+    /// A channel counts as unreliable when it was opened with `maxRetransmits` or
+    /// `maxPacketLifeTime` set (any value, so `maxRetransmits: 3` is gated too).
+    /// Only those channels are gated and paced; every other channel is reliable.
     pub unreliable_limit: Option<u32>,
+    /// Reliable byte cap: when a reliable send would push the bytes queued for a peer
+    /// (all channels, not yet released by SCTP) past this, the peer is closed with
+    /// reason "reliable-overflow" and send() returns false. 0 = unbounded. Default 4 MiB.
+    pub reliable_limit: Option<u32>,
+    /// Reliable-overload signal: `stats().overloaded` turns true once the pacer budget
+    /// has stayed below zero for this many ms (reliable load alone fills the link and
+    /// unreliable gets nothing). 0 disables. Default 1000.
+    pub overload_ms: Option<u32>,
     /// RACK-TLP loss detection on the SCTP association. Default true.
     pub rack: Option<bool>,
     /// SCTP RTO lower bound in ms. Default 1000 (RFC 9260).
@@ -86,6 +109,8 @@ pub struct ServerOptions {
 }
 
 const DEFAULT_UNRELIABLE_LIMIT: u32 = 64 * 1024;
+const DEFAULT_RELIABLE_LIMIT: u32 = 4 * 1024 * 1024;
+const DEFAULT_OVERLOAD_MS: u32 = 1000;
 
 #[napi(object)]
 pub struct Accepted {
@@ -99,6 +124,8 @@ pub struct Message {
     pub peer: u32,
     pub label: String,
     pub data: Buffer,
+    /// sent as a string (PPID 51/56) rather than binary
+    pub is_string: bool,
 }
 
 #[napi(object)]
@@ -121,14 +148,25 @@ pub struct PeerStats {
     pub rack_lost: f64,
     pub rack_probes: f64,
     pub t3_timeouts: f64,
+    /// reliable sends refused by the reliable byte cap (the peer is closed on the first)
+    pub reliable_overflows: f64,
+    /// messages rtc refused after send() returned true (channel closing, too big, ...)
+    pub send_errors: f64,
+    pub last_send_error: Option<String>,
+    /// pacer budget has been negative for `overloadMs`: shed reliable load or kick
+    pub overloaded: bool,
+    /// times `overloaded` turned true
+    pub overloads: f64,
+    /// why the peer was closed by lagless, e.g. "reliable-overflow"
+    pub close_reason: Option<String>,
 }
 
 #[napi]
 pub struct Server {
-    limit: usize,
+    limits: gate::Limits,
+    overload_ms: u32,
     rack: bool,
     rto_min: Option<u32>,
-    pacer: bool,
     bind_address: String,
     next_id: u32,
     peers: HashMap<u32, Peer>,
@@ -142,16 +180,22 @@ impl Server {
         let _ = env_logger::try_init();
         let opts = opts.unwrap_or(ServerOptions {
             unreliable_limit: None,
+            reliable_limit: None,
+            overload_ms: None,
             rack: None,
             rto_min: None,
             pacer: None,
             bind_address: None,
         });
         Server {
-            limit: opts.unreliable_limit.unwrap_or(DEFAULT_UNRELIABLE_LIMIT) as usize,
+            limits: gate::Limits {
+                unreliable: opts.unreliable_limit.unwrap_or(DEFAULT_UNRELIABLE_LIMIT) as usize,
+                reliable: opts.reliable_limit.unwrap_or(DEFAULT_RELIABLE_LIMIT) as usize,
+                pacer: opts.pacer.unwrap_or(true),
+            },
+            overload_ms: opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS),
             rack: opts.rack.unwrap_or(true),
             rto_min: opts.rto_min,
-            pacer: opts.pacer.unwrap_or(true),
             bind_address: opts.bind_address.unwrap_or_else(|| "0.0.0.0".to_string()),
             next_id: 1,
             peers: HashMap::new(),
@@ -171,12 +215,12 @@ impl Server {
         let (ans_tx, ans_rx) = channel::<std::result::Result<(String, u16), String>>();
         let sh = shared.clone();
         let inbox = self.inbox.clone();
-        let (rack, rto_min, pacer) = (self.rack, self.rto_min, self.pacer);
+        let (rack, rto_min, pacer, overload_ms) = (self.rack, self.rto_min, self.limits.pacer, self.overload_ms);
         let bind = self.bind_address.clone();
         std::thread::Builder::new()
             .name(format!("peer-{id}"))
             .spawn(move || {
-                if let Err(e) = worker(id, offer_json, bind, advertise_ip, advertise_port as u16, rack, rto_min, pacer, sh.clone(), inbox, rx, &ans_tx) {
+                if let Err(e) = worker(id, offer_json, bind, advertise_ip, advertise_port as u16, rack, rto_min, pacer, overload_ms, sh.clone(), inbox, rx, &ans_tx) {
                     let _ = ans_tx.send(Err(e.to_string()));
                 }
                 sh.closed.store(true, Ordering::Relaxed);
@@ -191,39 +235,47 @@ impl Server {
     }
 
     /// Returns false when an unreliable send was dropped by the backpressure gate
-    /// (caller keeps the state "owed"). `exempt` bypasses the gate (latency probes).
+    /// (caller keeps the state "owed"), or when a reliable send hit the reliable byte
+    /// cap (the peer is then closed, reason "reliable-overflow"). `exempt` bypasses the
+    /// gate and pacer (latency probes). `is_string` sends `data` (UTF-8) as a string.
+    ///
+    /// Each check-and-reserve is atomic, but the gate reads a snapshot of the SCTP queue
+    /// taken by the worker, so the limits are approximate by up to one worker loop.
+    /// Call send() for a given Server from one JS thread (it is not shareable anyway).
     #[napi]
-    pub fn send(&self, peer: u32, label: String, data: Buffer, exempt: bool) -> Result<bool> {
+    pub fn send(&self, peer: u32, label: String, data: Buffer, exempt: bool, is_string: Option<bool>) -> Result<bool> {
         let p = self.peers.get(&peer).ok_or_else(|| Error::from_reason("no such peer"))?;
         let s = &p.shared;
+        if s.closed.load(Ordering::Acquire) {
+            return Err(Error::from_reason("peer closed"));
+        }
         let unreliable = match s.channels.lock().unwrap().get(&label) {
             Some(u) => *u,
             None => return Err(Error::from_reason(format!("channel {label} not open"))),
         };
         let len = data.len();
-        if unreliable {
-            if !exempt && self.limit > 0 {
-                let out = s.stack_outstanding.load(Ordering::Relaxed) + s.pending_cmd.load(Ordering::Relaxed);
-                if out + len > self.limit {
-                    s.dropped.fetch_add(1, Ordering::Relaxed);
-                    return Ok(false);
-                }
-            }
-            if !exempt && self.pacer && s.tokens.load(Ordering::Relaxed) < len as i64 {
-                s.paced_drops.fetch_add(1, Ordering::Relaxed);
-                s.dropped.fetch_add(1, Ordering::Relaxed);
+        let max = s.max_message_size.load(Ordering::Relaxed);
+        if max > 0 && len > max {
+            return Err(Error::from_reason(format!("message of {len} bytes exceeds max message size {max}")));
+        }
+        let is_string = is_string.unwrap_or(false);
+        if is_string && std::str::from_utf8(&data).is_err() {
+            return Err(Error::from_reason("string message is not valid UTF-8"));
+        }
+        match gate::admit(s, self.limits, unreliable, exempt, len) {
+            gate::Verdict::Queued => {}
+            gate::Verdict::Dropped => return Ok(false),
+            gate::Verdict::Overflow => {
+                s.close_reason.lock().unwrap().get_or_insert_with(|| "reliable-overflow".to_string());
+                s.closed.store(true, Ordering::Release);
+                let _ = p.tx.send(Cmd::Close);
                 return Ok(false);
             }
-            s.sent_unreliable.fetch_add(1, Ordering::Relaxed);
         }
-        if self.pacer {
-            // reliable always goes, and may push the budget negative
-            s.tokens.fetch_sub(len as i64, Ordering::Relaxed);
+        if p.tx.send(Cmd::Send { label, data: data.to_vec(), is_string }).is_err() {
+            s.pending_cmd.fetch_sub(len, Ordering::AcqRel);
+            return Err(Error::from_reason("peer closed"));
         }
-        s.pending_cmd.fetch_add(len, Ordering::Relaxed);
-        p.tx
-            .send(Cmd::Send { label, data: data.to_vec() })
-            .map_err(|_| Error::from_reason("peer closed"))?;
         Ok(true)
     }
 
@@ -240,7 +292,7 @@ impl Server {
     pub fn drain(&self) -> Vec<Message> {
         let v = std::mem::take(&mut *self.inbox.lock().unwrap());
         v.into_iter()
-            .map(|m| Message { peer: m.peer, label: m.label, data: Buffer::from(m.data) })
+            .map(|m| Message { peer: m.peer, label: m.label, data: Buffer::from(m.data), is_string: m.is_string })
             .collect()
     }
 
@@ -268,6 +320,12 @@ impl Server {
                 rack_lost: s.rack_lost.load(Ordering::Relaxed) as f64,
                 rack_probes: s.rack_probes.load(Ordering::Relaxed) as f64,
                 t3_timeouts: s.t3_timeouts.load(Ordering::Relaxed) as f64,
+                reliable_overflows: s.reliable_overflows.load(Ordering::Relaxed) as f64,
+                send_errors: s.send_errors.load(Ordering::Relaxed) as f64,
+                last_send_error: s.last_send_error.lock().unwrap().clone(),
+                overloaded: s.overloaded.load(Ordering::Relaxed),
+                overloads: s.overloads.load(Ordering::Relaxed) as f64,
+                close_reason: s.close_reason.lock().unwrap().clone(),
             }
         })
     }
@@ -299,6 +357,7 @@ fn worker(
     rack: bool,
     rto_min: Option<u32>,
     pacer_on: bool,
+    overload_ms: u32,
     sh: Arc<PeerShared>,
     inbox: Arc<Mutex<Vec<Inbound>>>,
     rx: Receiver<Cmd>,
@@ -349,19 +408,25 @@ fn worker(
         sh.rate.store(pacer.rate as u64, Ordering::Relaxed);
     }
     let mut last_stats = Instant::now();
+    let mut overload = gate::Overload::new(if pacer_on { overload_ms } else { 0 });
 
     loop {
         // commands from JS
         loop {
             match rx.try_recv() {
-                Ok(Cmd::Send { label, data }) => {
+                Ok(Cmd::Send { label, data, is_string }) => {
                     let len = data.len();
-                    if let Some(cid) = ids.get(&label).copied() {
-                        if let Some(mut dc) = pc.data_channel(cid) {
-                            let _ = dc.send(Instant::now(), BytesMut::from(&data[..]));
+                    let r = match ids.get(&label).copied().and_then(|cid| pc.data_channel(cid)) {
+                        Some(mut dc) if is_string => {
+                            // validated as UTF-8 in send()
+                            let text = String::from_utf8(data).unwrap_or_default();
+                            dc.send_text(Instant::now(), text).map_err(|e| e.to_string())
                         }
-                    }
-                    sh.pending_cmd.fetch_sub(len, Ordering::Relaxed);
+                        Some(mut dc) => dc.send(Instant::now(), BytesMut::from(&data[..])).map_err(|e| e.to_string()),
+                        None => Err("channel closed".to_string()),
+                    };
+                    gate::record_send(&sh, &label, r);
+                    sh.pending_cmd.fetch_sub(len, Ordering::AcqRel);
                 }
                 Ok(Cmd::Close) => return Ok(()),
                 Err(std::sync::mpsc::TryRecvError::Empty) => break,
@@ -399,6 +464,9 @@ fn worker(
                         labels.insert(cid, label.clone());
                         ids.insert(label.clone(), cid);
                         sh.channels.lock().unwrap().insert(label, unreliable);
+                        if let Some(max) = pc.sctp().and_then(|t| t.max_message_size()) {
+                            sh.max_message_size.store(max as usize, Ordering::Relaxed);
+                        }
                     }
                 }
                 _ => {}
@@ -409,7 +477,7 @@ fn worker(
             while let Some(TaggedRTCMessage { message, .. }) = pc.poll_read() {
                 if let RTCMessage::DataChannelMessage(cid, m) = message {
                     if let Some(l) = labels.get(&cid) {
-                        got.push(Inbound { peer: id, label: l.clone(), data: m.data.to_vec() });
+                        got.push(Inbound { peer: id, label: l.clone(), data: m.data.to_vec(), is_string: m.is_string });
                     }
                 }
             }
@@ -424,17 +492,13 @@ fn worker(
                 out += dc.outstanding_bytes();
             }
         }
-        sh.stack_outstanding.store(out, Ordering::Relaxed);
+        sh.stack_outstanding.store(out, Ordering::Release);
 
         // pacer + transport stats
         let now = Instant::now();
         if pacer_on {
-            let add = pacer.refill(now);
-            let cap = pacer.burst_cap(1200) as i64;
-            let t = sh.tokens.fetch_add(add as i64, Ordering::Relaxed) + add as i64;
-            if t > cap {
-                sh.tokens.store(cap, Ordering::Relaxed);
-            }
+            gate::refill(&sh, &mut pacer, now);
+            overload.update(&sh, now);
         }
         if now.saturating_duration_since(last_stats) >= pacer::INTERVAL {
             last_stats = now;
