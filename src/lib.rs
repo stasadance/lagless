@@ -104,6 +104,11 @@ pub struct ServerOptions {
     pub rto_min: Option<u32>,
     /// Per-peer send pacer: unreliable sends need budget tokens. Default true.
     pub pacer: Option<bool>,
+    /// SCTP send weight per channel label, in data channel priority units
+    /// (128 very-low, 256 low = default, 512 medium, 1024 high). Setting any switches the
+    /// association to weighted fair queueing: each channel gets a share of the bytes SCTP
+    /// sends in proportion to its weight, so a 1024 pong channel jumps a 256 state queue.
+    pub channel_priority: Option<HashMap<String, u32>>,
     /// Local address peer sockets bind to. Default "0.0.0.0".
     pub bind_address: Option<String>,
 }
@@ -165,6 +170,7 @@ pub struct PeerStats {
 pub struct Server {
     limits: gate::Limits,
     overload_ms: u32,
+    priorities: Arc<HashMap<String, u16>>,
     rack: bool,
     rto_min: Option<u32>,
     bind_address: String,
@@ -182,6 +188,7 @@ impl Server {
             unreliable_limit: None,
             reliable_limit: None,
             overload_ms: None,
+            channel_priority: None,
             rack: None,
             rto_min: None,
             pacer: None,
@@ -194,6 +201,13 @@ impl Server {
                 pacer: opts.pacer.unwrap_or(true),
             },
             overload_ms: opts.overload_ms.unwrap_or(DEFAULT_OVERLOAD_MS),
+            priorities: Arc::new(
+                opts.channel_priority
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(l, p)| (l, p.clamp(1, u16::MAX as u32) as u16))
+                    .collect(),
+            ),
             rack: opts.rack.unwrap_or(true),
             rto_min: opts.rto_min,
             bind_address: opts.bind_address.unwrap_or_else(|| "0.0.0.0".to_string()),
@@ -217,10 +231,11 @@ impl Server {
         let inbox = self.inbox.clone();
         let (rack, rto_min, pacer, overload_ms) = (self.rack, self.rto_min, self.limits.pacer, self.overload_ms);
         let bind = self.bind_address.clone();
+        let priorities = self.priorities.clone();
         std::thread::Builder::new()
             .name(format!("peer-{id}"))
             .spawn(move || {
-                if let Err(e) = worker(id, offer_json, bind, advertise_ip, advertise_port as u16, rack, rto_min, pacer, overload_ms, sh.clone(), inbox, rx, &ans_tx) {
+                if let Err(e) = worker(id, offer_json, bind, advertise_ip, advertise_port as u16, rack, rto_min, pacer, overload_ms, priorities, sh.clone(), inbox, rx, &ans_tx) {
                     let _ = ans_tx.send(Err(e.to_string()));
                 }
                 sh.closed.store(true, Ordering::Relaxed);
@@ -358,6 +373,7 @@ fn worker(
     rto_min: Option<u32>,
     pacer_on: bool,
     overload_ms: u32,
+    priorities: Arc<HashMap<String, u16>>,
     sh: Arc<PeerShared>,
     inbox: Arc<Mutex<Vec<Inbound>>>,
     rx: Receiver<Cmd>,
@@ -367,7 +383,10 @@ fn worker(
     let local_addr = socket.local_addr()?;
 
     let offer: RTCSessionDescription = serde_json::from_str(&offer_json)?;
-    let mut seb = SettingEngineBuilder::new().with_lite(true).with_sctp_rack(rack);
+    let mut seb = SettingEngineBuilder::new()
+        .with_lite(true)
+        .with_sctp_rack(rack)
+        .with_sctp_weighted_fair_queueing(!priorities.is_empty());
     if let Some(ms) = rto_min {
         seb = seb.with_sctp_rto_min(ms as u64);
     }
@@ -458,8 +477,13 @@ fn worker(
                     }
                 }
                 RTCPeerConnectionEvent::OnDataChannel(RTCDataChannelEvent::OnOpen(cid)) => {
-                    if let Some(dc) = pc.data_channel(cid) {
+                    if let Some(mut dc) = pc.data_channel(cid) {
                         let label = dc.label().to_string();
+                        if let Some(&p) = priorities.get(&label) {
+                            if let Err(e) = dc.set_priority(p) {
+                                log::debug!("peer {id}: set_priority {label}: {e}");
+                            }
+                        }
                         let unreliable = dc.max_retransmits().is_some() || dc.max_packet_life_time().is_some();
                         labels.insert(cid, label.clone());
                         ids.insert(label.clone(), cid);

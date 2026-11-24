@@ -183,3 +183,32 @@ test('reliable byte cap kicks the peer', { timeout: 30000 }, async () => {
     ndc.cleanup();
   }
 });
+
+test('channelPriority lets a high channel jump a reliable backlog', { timeout: 30000 }, async () => {
+  const server = new Server({ pacer: false, reliableLimit: 0, channelPriority: { hi: 1024 } });
+  const pc = new ndc.PeerConnection('client', { iceServers: [] });
+  try {
+    const bulk = pc.createDataChannel('bulk');
+    const hi = pc.createDataChannel('hi');
+    const order: string[] = [];
+    bulk.onMessage(() => order.push('bulk'));
+    hi.onMessage(() => order.push('hi'));
+    const { peer } = await connect(server, pc);
+    await waitFor('channels open', () => bulk.isOpen() && hi.isOpen());
+    await waitFor('server channels open', () => {
+      try { return server.send(peer, 'bulk', Buffer.alloc(0)) && server.send(peer, 'hi', Buffer.alloc(0)); } catch { return false; }
+    });
+    await waitFor('empty msgs', () => order.length >= 2);
+    order.length = 0;
+    const N = 200;
+    for (let i = 0; i < N; i++) server.send(peer, 'bulk', Buffer.alloc(16 * 1024));
+    server.send(peer, 'hi', Buffer.from('pong'));
+    await waitFor('all delivered', () => order.length >= N + 1, 20000);
+    const at = order.indexOf('hi');
+    assert.ok(at < N / 2, `pong arrived after ${at} of ${N} bulk messages`);
+  } finally {
+    pc.close();
+    server.close();
+    ndc.cleanup();
+  }
+});

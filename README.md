@@ -94,7 +94,7 @@ client against coturn.
 
 | | |
 |---|---|
-| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
+| `new Server(opts?)` | `unreliableLimit` (bytes, 0 = off), `reliableLimit` (bytes queued per peer before it's kicked, default 4 MiB, 0 = off), `overloadMs` (default 1000, 0 = off), `channelPriority` (`{ label: weight }`), `rack`, `pacer`, `rtoMin` (ms, default 1000), `bindAddress`, `drainIntervalMs` (default 1) |
 | `accept(offer, advertiseIp, advertisePort = 0)` | `offer` is `{ type, sdp }` or its JSON. → `{ peer, answer, localPort }`. `advertisePort` 0 = the bound port |
 | `send(peer, label, data, { exempt }?)` | `data` is a string (sent as a WebRTC string) or bytes. → `boolean`. `false` = unreliable dropped (gate or budget), or reliable hit `reliableLimit` (peer closed, `closeReason: 'reliable-overflow'`). Throws if the peer is closed, the channel isn't open or `data` exceeds the max message size |
 | `on('message', ({ peer, label, data, isString }) => …)` | every inbound message, all peers. `isString`: the sender sent a string |
@@ -112,6 +112,10 @@ Notes:
 - **Reliable overload.** Reliable sends always go and may push the budget negative. `stats().overloaded`
   turns true when the budget stayed below zero for `overloadMs`: reliable load alone fills the link and
   unreliable gets nothing. Shed reliable load or kick the peer.
+- **Channel priority.** `channelPriority: { pong: 1024 }` switches SCTP to weighted fair queueing
+  (RFC 8260): each channel gets a share of the sent bytes in proportion to its weight (128 very-low,
+  256 low = default, 512 medium, 1024 high), so a pong jumps a reliable backlog inside SCTP, not just
+  the gate. Without it SCTP sends first-come-first-served.
 - **Send failures.** A message rtc refuses after `send()` returned `true` (channel closing, ...) bumps
   `stats().sendErrors` and sets `lastSendError`.
 - **Threading.** `send()` admission is atomic (CAS on the reservation and the budget), but it compares

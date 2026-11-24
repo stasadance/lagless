@@ -12,7 +12,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 # webrtc-rs/rtc fork with RACK-TLP, cwnd and stats patches (see README)
-rtc = { git = "https://github.com/stasadance/rtc", branch = "lagless" }
+rtc = { git = "https://github.com/stasadance/rtc", branch = "lagless-priority" }
 napi = { version = "3", default-features = false, features = ["napi8"] }
 napi-derive = "3"
 bytes = "1"
